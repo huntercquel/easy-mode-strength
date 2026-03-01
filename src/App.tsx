@@ -68,6 +68,12 @@ interface LogEntry {
   workoutKey: string
 }
 
+interface DailyRoutineTrack {
+  committed: boolean
+  morningResetDone: boolean
+  snacks: Record<number, boolean>
+}
+
 interface AppState {
   week: number
   nextSession: number
@@ -78,6 +84,7 @@ interface AppState {
   notes: string
   logs: LogEntry[]
   coreDays: Record<string, boolean>
+  dailyRoutineByDate: Record<string, DailyRoutineTrack>
   sessionConfigs: Record<number, SessionConfig>
   setLogsByKey: Record<string, Record<string, SetRow[]>>
   checksByKey: Record<string, Record<number, boolean>>
@@ -101,83 +108,112 @@ const tierDescriptions: Record<Tier, string> = {
   A: 'Tier A (75+ min)',
 }
 
-const weekRPECaps: Record<number, string> = {
-  1: 'RPE 6 max',
-  2: 'RPE 6-7 max',
-  3: 'RPE 7 max',
-  4: 'RPE 7-8 max (only if feeling good)',
-}
+const DAILY_SNACK_SLOTS = 6
 
 const defaultSessionConfigs: Record<number, SessionConfig> = {
   1: {
-    name: 'Session 1 - Pull + Core',
-    focus: 'Pull strength priority',
+    name: 'Session 1 - Brace + Pull',
+    focus: 'Core Base first, then pull work if tolerated',
     exercises: [
-      { id: 's1e1', name: 'Weighted Pull-ups', load: '+10 kg', prescription: '4-5 x 3-5 @ RPE 6-7' },
-      { id: 's1e2', name: 'Bodyweight Pull-up Back-off', load: 'BW', prescription: '2-3 x 5-8 clean' },
-      { id: 's1e3', name: 'Row Variation', load: '', prescription: '2-3 x 8-12' },
-      { id: 's1e4', name: 'Core (Side plank + Bird dog)', load: '', prescription: '1-2 rounds' },
+      { id: 's1e1', name: 'RKC plank', load: '', prescription: '3 x 15-25 sec (Core Base)' },
+      {
+        id: 's1e2',
+        name: 'Dead bug (band/cable pulldown)',
+        load: '',
+        prescription: '3 x 6/side, slow tempo (Core Base)',
+      },
+      { id: 's1e3', name: 'Suitcase carry', load: 'Heavy DB/KB', prescription: '3 x 30-45 sec/side (Core Base)' },
+      {
+        id: 's1e4',
+        name: 'Pull-up variation',
+        load: 'Tier A: weighted / Tier B: BW',
+        prescription: 'Tier A: 4-6 x 3-6, Tier B: 3-4 sets with 2 reps in reserve',
+      },
     ],
     tierC: [
-      '5 min warm-up: scap pulls, band rows, dead bug, easy pull-up sets',
-      'Main lift only + core minimum',
-      'Stop while reps are clean (no grinders)',
+      'Do Core Base only (required) before any lifting decisions',
+      'Skip lifting and add 10-20 min easy walk',
+      'If symptoms ramp up next morning, stay Tier C for 48-72h',
     ],
-    tierB: ['Tier C plus back-off and row variation', 'Keep total work crisp - leave reps in reserve'],
-    tierA: ['Tier B plus extra pull volume + longer core', 'No ego reps - quality over fatigue'],
+    tierB: ['After Core Base: bodyweight pull-ups for 3-4 sets, leave 2 reps in reserve'],
+    tierA: ['After Core Base: weighted pull-ups for 4-6 sets of 3-6 reps'],
   },
   2: {
-    name: 'Session 2 - Lower + Push',
-    focus: 'Weighted dips + back-friendly lower',
+    name: 'Session 2 - Anti-rotation + Push',
+    focus: 'Core Base first, then push bonus',
     exercises: [
-      { id: 's2e1', name: 'Weighted Dips', load: '+15 kg', prescription: '4 x 3-5 @ RPE 6-7' },
-      { id: 's2e2', name: 'Goblet / Split / Belt Squat', load: '', prescription: '2-3 x 6-10 @ RPE 6' },
-      { id: 's2e3', name: 'Extra Lower Movement', load: '', prescription: '2-3 sets' },
-      { id: 's2e4', name: 'Core (Bird dog / Dead bug)', load: '', prescription: '1-2 rounds' },
+      { id: 's2e1', name: 'Pallof press', load: 'Band/cable', prescription: '3 x 8/side with 2-sec hold (Core Base)' },
+      { id: 's2e2', name: 'Side plank row', load: 'Band/cable', prescription: '3 x 8/side (Core Base)' },
+      {
+        id: 's2e3',
+        name: 'Front rack carry (or heavy farmer carry)',
+        load: 'Heavy',
+        prescription: '3 x 30-45 sec (Core Base)',
+      },
+      {
+        id: 's2e4',
+        name: 'Push variation',
+        load: 'Tier A: weighted dips / Tier B: dips or push-ups',
+        prescription: 'Tier A: 4-6 x 3-6, Tier B: 3-4 sets with 2 reps in reserve',
+      },
     ],
     tierC: [
-      '5 min warm-up: glute bridge, BW squat, hinge drill, side plank',
-      'Dips + one back-friendly lower movement + core',
-      'If back is yellow, keep RPE 6 and supported options only',
+      'Do Core Base only (required)',
+      'Skip lifting, add one extra Pallof round + easy walk',
+      'Keep pain <= 3/10 during and next day',
     ],
-    tierB: ['Tier C plus extra lower movement and dip back-off'],
-    tierA: ['Tier B plus optional posterior chain accessory if back is green'],
+    tierB: ['After Core Base: dips or push-ups for 3-4 sets with 2 reps in reserve'],
+    tierA: ['After Core Base: weighted dips for 4-6 sets of 3-6 reps'],
   },
   3: {
-    name: 'Session 3 - Muscle-Up Skill + Pull',
-    focus: 'Skill quality + pull volume',
+    name: 'Session 3 - Hinge Tolerance + Legs',
+    focus: 'Back-friendly lower exposure, no RDLs',
     exercises: [
-      { id: 's3e1', name: 'Muscle-Up Technique', load: 'BW', prescription: '5-10 clean singles / drills' },
-      { id: 's3e2', name: 'Bodyweight Pull-ups/Chin-ups', load: 'BW', prescription: '3 x 4-8 @ RPE 6-7' },
+      { id: 's3e1', name: 'McGill curl-up', load: '', prescription: '5 x 10-sec holds (Core Base)' },
+      { id: 's3e2', name: 'Bird dog', load: '', prescription: '6/side with 5-sec holds (Core Base)' },
       {
         id: 's3e3',
-        name: 'Weighted Pull-up (light/moderate)',
-        load: '+5 kg',
-        prescription: '3-4 x 3-4 @ RPE 6',
+        name: 'Hip-driven back extension',
+        load: 'Bodyweight or light',
+        prescription: '3 x 8-12, smooth reps, stop before pinch (Core Base)',
       },
-      { id: 's3e4', name: 'Core (Side plank + Dead bug)', load: '', prescription: '1-2 rounds' },
+      {
+        id: 's3e4',
+        name: 'Squat variation',
+        load: 'Tier A: tempo squat / Tier B: goblet + split squat',
+        prescription: 'Tier A: 4 x 3-6, Tier B: 3 x 8-10 + 2-3 x 8/side',
+      },
     ],
-    tierC: ['5 min warm-up + skill work + pull volume + core'],
-    tierB: ['Tier C plus light/moderate weighted pull-up and row variation'],
-    tierA: ['Tier B plus support holds and upper-back prehab'],
+    tierC: [
+      'Do Core Base only, no squats if back is not happy',
+      'Swap lifting for 15-25 min incline walk',
+      'No RDLs for now',
+    ],
+    tierB: ['After Core Base: goblet squat 3 x 8-10 + split squat 2-3 x 8/side'],
+    tierA: ['After Core Base: tempo squat (3-sec down + 1-sec pause) 4 x 3-6, stop before butt-wink'],
   },
   4: {
-    name: 'Session 4 - Push + Lower + Core',
-    focus: 'Push strength + lower exposure',
+    name: 'Session 4 - Mixed Core + Capacity',
+    focus: 'Bulletproofing: anti-rotation, carries, and easy capacity',
     exercises: [
-      { id: 's4e1', name: 'Push Strength Variation', load: '', prescription: '4 x 4-6 @ RPE 6-7' },
+      { id: 's4e1', name: 'Cable chop hold', load: 'Cable/band', prescription: '3 x 20 sec/side (Core Base)' },
+      { id: 's4e2', name: 'Side plank', load: '', prescription: '2 x 30-45 sec/side (Core Base)' },
       {
-        id: 's4e2',
-        name: 'Lower Exposure (split/goblet/step-up)',
-        load: '',
-        prescription: '2-3 x 6-10',
+        id: 's4e3',
+        name: 'Carry ladder',
+        load: 'Suitcase / farmer / front rack',
+        prescription: '10 min rotating carries (Core Base)',
       },
-      { id: 's4e3', name: 'Upper Accessory', load: '', prescription: '2-3 x 6-10' },
-      { id: 's4e4', name: 'Core (Side plank/Pallof)', load: '', prescription: '2 rounds' },
+      {
+        id: 's4e4',
+        name: 'Capacity option',
+        load: 'Tier A: light cali / Tier B: simple circuit',
+        prescription: 'Tier A: technique/volume cali, Tier B: 12-15 min push-ups -> rows -> carries',
+      },
     ],
-    tierC: ['5 min warm-up + push + lower + core'],
-    tierB: ['Tier C plus upper accessory + posterior chain accessory if tolerated'],
-    tierA: ['Tier B plus extra push volume + longer trunk circuit'],
+    tierC: ['Do Core Base only, then walk', 'Tier C still counts as a win'],
+    tierB: ['After Core Base: 12-15 min circuit (not to failure): push-ups -> rows -> carries'],
+    tierA: ['After Core Base: lighter technique/volume cali (ex: muscle-up practice + easy pull/push volume)'],
   },
 }
 
@@ -191,6 +227,7 @@ const defaultState: AppState = {
   notes: '',
   logs: [],
   coreDays: {},
+  dailyRoutineByDate: {},
   sessionConfigs: defaultSessionConfigs,
   setLogsByKey: {},
   checksByKey: {},
@@ -210,6 +247,42 @@ function normalizeTier(value: unknown, fallback: Tier = 'C'): Tier {
   return value === 'A' || value === 'B' || value === 'C' ? value : fallback
 }
 
+function makeDefaultSnackChecks(): Record<number, boolean> {
+  const snacks: Record<number, boolean> = {}
+  for (let idx = 0; idx < DAILY_SNACK_SLOTS; idx += 1) {
+    snacks[idx] = false
+  }
+  return snacks
+}
+
+function normalizeSnackChecks(raw: unknown): Record<number, boolean> {
+  const normalized = makeDefaultSnackChecks()
+
+  if (!raw || typeof raw !== 'object') {
+    return normalized
+  }
+
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const idx = Number(key)
+    if (Number.isNaN(idx) || idx < 0 || idx >= DAILY_SNACK_SLOTS) {
+      continue
+    }
+
+    normalized[idx] = value === true
+  }
+
+  return normalized
+}
+
+function normalizeDailyRoutineTrack(raw: unknown): DailyRoutineTrack {
+  const source = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  return {
+    committed: source.committed === true,
+    morningResetDone: source.morningResetDone === true,
+    snacks: normalizeSnackChecks(source.snacks),
+  }
+}
+
 function normalizeLoadedState(raw: Partial<AppState> | null | undefined): AppState {
   if (!raw) {
     return defaultState
@@ -218,12 +291,17 @@ function normalizeLoadedState(raw: Partial<AppState> | null | undefined): AppSta
   const legacyMinutes = Number(raw.minutesAvailable || defaultState.minutesAvailable)
   const inferredTier = getTierFromTime(legacyMinutes)
   const timeTier = normalizeTier(raw.timeTier, inferredTier)
+  const rawDailyRoutine = raw.dailyRoutineByDate ?? {}
+  const dailyRoutineByDate = Object.fromEntries(
+    Object.entries(rawDailyRoutine).map(([date, routine]) => [date, normalizeDailyRoutineTrack(routine)]),
+  ) as Record<string, DailyRoutineTrack>
 
   return {
     ...defaultState,
     ...raw,
     timeTier,
     minutesAvailable: minutesFromTier(timeTier),
+    dailyRoutineByDate,
     sessionConfigs: {
       ...defaultSessionConfigs,
       ...(raw.sessionConfigs ?? {}),
@@ -233,6 +311,15 @@ function normalizeLoadedState(raw: Partial<AppState> | null | undefined): AppSta
 
 function nextSessionNumber(current: number): number {
   return current === 4 ? 1 : current + 1
+}
+
+function trailingDateKeys(days: number, endDate: string): string[] {
+  const base = new Date(`${endDate}T12:00:00`)
+  return Array.from({ length: days }, (_, idx) => {
+    const d = new Date(base)
+    d.setDate(base.getDate() - (days - 1 - idx))
+    return d.toISOString().slice(0, 10)
+  })
 }
 
 function getRecommendation({
@@ -252,19 +339,19 @@ function getRecommendation({
 
   if (backStatus === 'red') {
     adjustedTier = 'C'
-    note = 'Red back day: Tier C + core minimum. Avoid heavy lower loading. Pain-free upper work only.'
-    if ([2, 4].includes(nextSession)) {
+    note = 'Flare-up mode (48-72h): Tier C only. Do Core Base + walking. Skip heavy loading and deep bending.'
+    if (nextSession === 3) {
       sessionOverride = 1
       note += ' Suggested swap to Session 1 today.'
     }
   } else if (backStatus === 'yellow') {
     if (selectedTier === 'A') adjustedTier = 'B'
-    note = 'Yellow back day: cap at RPE 6, choose supported lower options, reduce ROM/load, add core.'
+    note = 'Caution day: keep pain <= 3/10 during and next day, no spreading symptoms, and cap effort around RPE 6.'
   } else {
     note =
       energy <= 2
-        ? 'Low energy day: Tier C still counts. Protect momentum.'
-        : 'Green light - run the next session with your selected tier.'
+        ? 'Low energy day: complete Core Base and walk. Tier C still counts as a full win.'
+        : 'Green light: earn lifting by finishing Core Base first, then run your selected tier.'
   }
 
   return { tier: adjustedTier, session: sessionOverride ?? nextSession, note }
@@ -522,6 +609,7 @@ export default function App() {
   const activeSessionConfig = state.sessionConfigs[recommendation.session]
   const checklist = state.checksByKey[workoutKey] || {}
   const setLogs = state.setLogsByKey[workoutKey] || {}
+  const today = todayDate()
 
   const weekLogs = state.logs.filter((log) => log.week === state.week)
   const weekProgress = Math.min(100, (weekLogs.length / 4) * 100)
@@ -530,6 +618,42 @@ export default function App() {
   const tierKey: 'tierA' | 'tierB' | 'tierC' =
     recommendation.tier === 'A' ? 'tierA' : recommendation.tier === 'B' ? 'tierB' : 'tierC'
   const tierRules = activeSessionConfig[tierKey] || []
+  const coreBaseExercises = activeSessionConfig.exercises.slice(0, 3)
+  const todayRoutine = normalizeDailyRoutineTrack(state.dailyRoutineByDate[today])
+  const snacksDone = Object.values(todayRoutine.snacks).filter(Boolean).length
+  const weeklySummary = useMemo(() => {
+    const dates = trailingDateKeys(7, today)
+    let committedDays = 0
+    let morningResetDays = 0
+    let snackCount = 0
+    let snackDaysAtLeastThree = 0
+
+    for (const date of dates) {
+      const routine = normalizeDailyRoutineTrack(state.dailyRoutineByDate[date])
+      if (routine.committed) {
+        committedDays += 1
+      }
+      if (routine.morningResetDone) {
+        morningResetDays += 1
+      }
+
+      const daySnackCount = Object.values(routine.snacks).filter(Boolean).length
+      snackCount += daySnackCount
+      if (daySnackCount >= 3) {
+        snackDaysAtLeastThree += 1
+      }
+    }
+
+    return {
+      committedDays,
+      morningResetDays,
+      snackCount,
+      snackDaysAtLeastThree,
+      commitProgress: Math.round((committedDays / 7) * 100),
+      morningProgress: Math.round((morningResetDays / 7) * 100),
+      snackProgress: Math.min(100, Math.round((snackCount / 21) * 100)),
+    }
+  }, [state.dailyRoutineByDate, today])
 
   const updateState = (patch: Partial<AppState>) => setState((current) => ({ ...current, ...patch }))
 
@@ -656,6 +780,53 @@ export default function App() {
     }))
   }
 
+  const updateTodayRoutine = (updater: (routine: DailyRoutineTrack) => DailyRoutineTrack) => {
+    const day = todayDate()
+    setState((current) => {
+      const existing = normalizeDailyRoutineTrack(current.dailyRoutineByDate[day])
+      return {
+        ...current,
+        dailyRoutineByDate: {
+          ...current.dailyRoutineByDate,
+          [day]: updater(existing),
+        },
+      }
+    })
+  }
+
+  const toggleDailyCommit = () => {
+    updateTodayRoutine((routine) => ({ ...routine, committed: !routine.committed }))
+  }
+
+  const toggleMorningReset = () => {
+    updateTodayRoutine((routine) => ({ ...routine, morningResetDone: !routine.morningResetDone }))
+  }
+
+  const toggleSnackSlot = (slot: number) => {
+    updateTodayRoutine((routine) => ({
+      ...routine,
+      snacks: { ...routine.snacks, [slot]: !routine.snacks[slot] },
+    }))
+  }
+
+  const markNextSnack = () => {
+    updateTodayRoutine((routine) => {
+      const nextSlot = Array.from({ length: DAILY_SNACK_SLOTS }, (_, idx) => idx).find((idx) => !routine.snacks[idx])
+      if (nextSlot === undefined) {
+        return routine
+      }
+
+      return {
+        ...routine,
+        snacks: { ...routine.snacks, [nextSlot]: true },
+      }
+    })
+  }
+
+  const clearSnacks = () => {
+    updateTodayRoutine((routine) => ({ ...routine, snacks: makeDefaultSnackChecks() }))
+  }
+
   const markCoreDay = () => {
     const day = todayDate()
     setState((current) => ({
@@ -667,8 +838,9 @@ export default function App() {
   const completeSession = () => {
     const checkCount = Object.values(checklist).filter(Boolean).length
     const exerciseSetCount = Object.values(setLogs).reduce((sum, rows) => sum + rows.length, 0)
+    const day = todayDate()
     const logEntry: LogEntry = {
-      date: todayDate(),
+      date: day,
       week: state.week,
       session: recommendation.session,
       tier: recommendation.tier,
@@ -687,7 +859,14 @@ export default function App() {
       logs: [logEntry, ...current.logs].slice(0, 120),
       nextSession: nextSessionNumber(current.nextSession),
       notes: '',
-      coreDays: { ...current.coreDays, [todayDate()]: true },
+      coreDays: { ...current.coreDays, [day]: true },
+      dailyRoutineByDate: {
+        ...current.dailyRoutineByDate,
+        [day]: {
+          ...normalizeDailyRoutineTrack(current.dailyRoutineByDate[day]),
+          committed: true,
+        },
+      },
     }))
   }
 
@@ -910,11 +1089,11 @@ export default function App() {
             <CardHeader>
               <CardTitle className="flex items-center justify-between gap-2 text-xl md:text-2xl">
                 <span className="flex items-center gap-2">
-                  <Dumbbell className="h-5 w-5" /> Life-Proof Strength Block v2
+                  <Dumbbell className="h-5 w-5" /> Life-Proof Strength Core-First
                 </span>
                 <Badge variant="secondary">Week {state.week} / 4</Badge>
               </CardTitle>
-              <p className="text-sm text-slate-600">Never miss twice. Never require perfect conditions.</p>
+              <p className="text-sm text-slate-600">Earn the right to lift: Core Base first. Tier work is bonus.</p>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-white p-3 text-sm">
@@ -1013,8 +1192,8 @@ export default function App() {
               <div className="rounded-2xl border bg-white p-3">
                 <div className="flex items-center justify-between gap-2">
                   <div>
-                    <div className="text-sm font-medium text-slate-900">This week RPE cap</div>
-                    <div className="text-sm text-slate-600">{weekRPECaps[state.week]}</div>
+                    <div className="text-sm font-medium text-slate-900">Win condition</div>
+                    <div className="text-sm text-slate-600">4 Core Bases/week + daily morning reset + movement snacks</div>
                   </div>
                   <Button
                     variant="outline"
@@ -1031,8 +1210,35 @@ export default function App() {
                   </div>
                   <Progress value={weekProgress} />
                   <div className="flex items-center justify-between text-xs text-slate-600">
-                    <span>Core minimum days (target 4-6)</span>
+                    <span>Core Base days (target 4)</span>
                     <span>{coreCount}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border bg-white p-3">
+                <div className="text-sm font-medium text-slate-900">Weekly Routine Summary (last 7 days)</div>
+                <div className="mt-3 space-y-2">
+                  <div className="flex items-center justify-between text-xs text-slate-600">
+                    <span>Committed days (target 7)</span>
+                    <span>{weeklySummary.committedDays}/7</span>
+                  </div>
+                  <Progress value={weeklySummary.commitProgress} />
+
+                  <div className="flex items-center justify-between text-xs text-slate-600">
+                    <span>Morning resets (target 7)</span>
+                    <span>{weeklySummary.morningResetDays}/7</span>
+                  </div>
+                  <Progress value={weeklySummary.morningProgress} />
+
+                  <div className="flex items-center justify-between text-xs text-slate-600">
+                    <span>Movement snacks (baseline target 21)</span>
+                    <span>{weeklySummary.snackCount}/21</span>
+                  </div>
+                  <Progress value={weeklySummary.snackProgress} />
+
+                  <div className="text-xs text-slate-500">
+                    Days with 3+ snacks: {weeklySummary.snackDaysAtLeastThree}/7
                   </div>
                 </div>
               </div>
@@ -1073,6 +1279,10 @@ export default function App() {
                 </div>
 
                 <div className="rounded-xl border bg-white p-3">
+                  <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-2 text-sm text-slate-700">
+                    Non-negotiable: morning reset daily + session Core Base first. Pain rule: stay at &lt;= 3/10 during
+                    and next day with no spreading symptoms. No RDLs for now.
+                  </div>
                   <div className="mb-2 flex items-center justify-between">
                     <div className="font-medium">Tier guidance</div>
                     <Button variant="ghost" size="sm" onClick={clearTodayChecks}>
@@ -1105,24 +1315,66 @@ export default function App() {
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <div className="rounded-xl border p-3">
                     <div className="mb-2 flex items-center gap-2 font-medium">
-                      <Timer className="h-4 w-4" /> Core Minimum (6-10 min)
+                      <Timer className="h-4 w-4" /> Session Core Base (required)
                     </div>
                     <div className="space-y-1 text-sm text-slate-700">
-                      <div>- Bird dog: 2 x 5/side (slow)</div>
-                      <div>- Side plank: 2 x 20-30s/side</div>
-                      <div>- Dead bug: 2 x 6/side</div>
-                      <div>- Optional suitcase carry: 2 trips/side</div>
+                      {coreBaseExercises.map((exercise) => (
+                        <div key={exercise.id}>- {exercise.name}: {exercise.prescription}</div>
+                      ))}
                     </div>
                     <Button
                       className="mt-3 rounded-xl"
-                      variant={state.coreDays[todayDate()] ? 'default' : 'outline'}
+                      variant={state.coreDays[today] ? 'default' : 'outline'}
                       onClick={markCoreDay}
                     >
-                      {state.coreDays[todayDate()] ? 'Core day logged' : 'Log core minimum'}
+                      {state.coreDays[today] ? 'Core Base logged' : 'Log Core Base'}
                     </Button>
                   </div>
 
-                  <div className="space-y-2 rounded-xl border p-3">
+                  <div className="rounded-xl border p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="font-medium">Daily morning + snack tracker</div>
+                      <Button
+                        size="sm"
+                        variant={todayRoutine.committed ? 'default' : 'outline'}
+                        className="rounded-xl"
+                        onClick={toggleDailyCommit}
+                      >
+                        {todayRoutine.committed ? 'Committed today' : 'Commit today'}
+                      </Button>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-2 rounded-lg border p-2">
+                        <Checkbox checked={todayRoutine.morningResetDone} onCheckedChange={toggleMorningReset} />
+                        <span className="text-sm">Morning stiffness reset done (3-6 min)</span>
+                      </label>
+                    </div>
+                    <div className="mt-3 flex items-center justify-between text-xs text-slate-600">
+                      <span>Movement snacks today</span>
+                      <span>
+                        {snacksDone}/{DAILY_SNACK_SLOTS}
+                      </span>
+                    </div>
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      {Array.from({ length: DAILY_SNACK_SLOTS }, (_, idx) => (
+                        <label key={idx} className="flex items-center gap-2 rounded-lg border p-2">
+                          <Checkbox checked={todayRoutine.snacks[idx]} onCheckedChange={() => toggleSnackSlot(idx)} />
+                          <span className="text-sm">Snack {idx + 1}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <div className="mt-3 flex gap-2">
+                      <Button size="sm" variant="outline" className="rounded-xl" onClick={markNextSnack}>
+                        Mark next snack
+                      </Button>
+                      <Button size="sm" variant="ghost" className="rounded-xl" onClick={clearSnacks}>
+                        Clear snacks
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-2 rounded-xl border p-3">
                     <Label htmlFor="notes">Quick notes (optional)</Label>
                     <Textarea
                       id="notes"
@@ -1131,7 +1383,6 @@ export default function App() {
                       placeholder="e.g. Pull-ups felt smooth. Back yellow but okay after warm-up."
                       className="min-h-[120px]"
                     />
-                  </div>
                 </div>
 
                 <div className="flex flex-wrap gap-2">
@@ -1139,7 +1390,7 @@ export default function App() {
                     <CheckCircle2 className="mr-2 h-4 w-4" /> Complete session & advance rotation
                   </Button>
                   <Button variant="outline" className="rounded-xl" onClick={markCoreDay}>
-                    Log core only day
+                    Log Core Base only day
                   </Button>
                   <Button variant="outline" className="rounded-xl" onClick={resetBlock}>
                     <RotateCcw className="mr-2 h-4 w-4" /> Reset block
