@@ -217,6 +217,64 @@ const defaultSessionConfigs: Record<number, SessionConfig> = {
   },
 }
 
+function cloneSessionConfigs(configs: Record<number, SessionConfig>): Record<number, SessionConfig> {
+  return Object.fromEntries(
+    Object.entries(configs).map(([sessionNum, cfg]) => [
+      Number(sessionNum),
+      {
+        ...cfg,
+        exercises: cfg.exercises.map((exercise) => ({ ...exercise })),
+        tierA: [...cfg.tierA],
+        tierB: [...cfg.tierB],
+        tierC: [...cfg.tierC],
+      },
+    ]),
+  ) as Record<number, SessionConfig>
+}
+
+function containsLegacyTemplateData(configs: Record<number, SessionConfig>): boolean {
+  const legacyMarkers = [
+    'Session 1 - Pull + Core',
+    'Session 2 - Lower + Push',
+    'Session 3 - Muscle-Up Skill + Pull',
+    'Session 4 - Push + Lower + Core',
+    'Weighted Pull-ups',
+    'Bodyweight Pull-up Back-off',
+    'Row Variation',
+    'Core (Side plank + Bird dog)',
+    'Main lift only + core minimum',
+  ]
+
+  return Object.values(configs).some((cfg) => {
+    if (legacyMarkers.some((marker) => cfg.name.includes(marker) || cfg.focus.includes(marker))) {
+      return true
+    }
+
+    if (cfg.tierA.concat(cfg.tierB, cfg.tierC).some((rule) => legacyMarkers.some((marker) => rule.includes(marker)))) {
+      return true
+    }
+
+    return cfg.exercises.some((exercise) =>
+      legacyMarkers.some(
+        (marker) => exercise.name.includes(marker) || exercise.load.includes(marker) || exercise.prescription.includes(marker),
+      ),
+    )
+  })
+}
+
+function normalizeSessionConfigs(raw: Partial<Record<number, SessionConfig>> | undefined): Record<number, SessionConfig> {
+  const merged = {
+    ...cloneSessionConfigs(defaultSessionConfigs),
+    ...(raw ?? {}),
+  } as Record<number, SessionConfig>
+
+  if (containsLegacyTemplateData(merged)) {
+    return cloneSessionConfigs(defaultSessionConfigs)
+  }
+
+  return merged
+}
+
 const defaultState: AppState = {
   week: 1,
   nextSession: 1,
@@ -228,7 +286,7 @@ const defaultState: AppState = {
   logs: [],
   coreDays: {},
   dailyRoutineByDate: {},
-  sessionConfigs: defaultSessionConfigs,
+  sessionConfigs: cloneSessionConfigs(defaultSessionConfigs),
   setLogsByKey: {},
   checksByKey: {},
 }
@@ -302,10 +360,7 @@ function normalizeLoadedState(raw: Partial<AppState> | null | undefined): AppSta
     timeTier,
     minutesAvailable: minutesFromTier(timeTier),
     dailyRoutineByDate,
-    sessionConfigs: {
-      ...defaultSessionConfigs,
-      ...(raw.sessionConfigs ?? {}),
-    },
+    sessionConfigs: normalizeSessionConfigs(raw.sessionConfigs),
   }
 }
 
@@ -873,6 +928,13 @@ export default function App() {
   const resetBlock = () => {
     setState(defaultState)
     setActiveTab('do')
+  }
+
+  const resetSessionTemplatesToCoreFirst = () => {
+    setState((current) => ({
+      ...current,
+      sessionConfigs: cloneSessionConfigs(defaultSessionConfigs),
+    }))
   }
 
   const signInWithPassword = async () => {
@@ -1485,9 +1547,14 @@ export default function App() {
           <TabsContent value="edit" className="space-y-4">
             <Card className="rounded-2xl shadow-sm">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg">
-                  <Save className="h-4 w-4" /> Edit session templates (exercise names + loads)
-                </CardTitle>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <CardTitle className="flex items-center gap-2 text-lg">
+                    <Save className="h-4 w-4" /> Edit session templates (exercise names + loads)
+                  </CardTitle>
+                  <Button size="sm" variant="outline" className="rounded-xl" onClick={resetSessionTemplatesToCoreFirst}>
+                    Reset to core-first defaults
+                  </Button>
+                </div>
                 <p className="text-sm text-slate-600">Changes save automatically to Supabase.</p>
               </CardHeader>
               <CardContent className="space-y-4">
