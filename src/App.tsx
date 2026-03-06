@@ -1,17 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import type { Session } from '@supabase/supabase-js'
-import {
-  CheckCircle2,
-  Dumbbell,
-  LogOut,
-  Play,
-  Plus,
-  RotateCcw,
-  Save,
-  Timer,
-  Trash2,
-} from 'lucide-react'
+import { CheckCircle2, Dumbbell, LogOut, Play, Plus, RotateCcw, Save, Timer, Trash2 } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -23,467 +13,76 @@ import { Progress } from '@/components/ui/progress'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { SUPABASE_STATE_TABLE, isSupabaseConfigured, supabase } from '@/lib/supabase'
+import {
+  DAILY_SNACK_SLOTS,
+  blankSetRow,
+  cloneSessionConfigs,
+  countLoggedSets,
+  defaultSessionConfigs,
+  defaultState,
+  findLogByWorkoutKey,
+  getCompletionStatusLabel,
+  getLogTypeLabel,
+  getRecommendation,
+  getWeekStats,
+  makeDefaultSnackChecks,
+  makeWorkoutKey,
+  minutesFromTier,
+  nextSessionNumber,
+  normalizeDailyRoutineTrack,
+  normalizeLoadedState,
+  prefilledSetFromTarget,
+  tierDescriptions,
+  todayDate,
+  trailingDateKeys,
+  uid,
+  upsertLogEntry,
+} from '@/lib/training-state'
+import type {
+  AppState,
+  AuthMode,
+  BackStatus,
+  Exercise,
+  LogEntry,
+  LogType,
+  SessionConfig,
+  SetRow,
+  Tier,
+} from '@/lib/training-state'
 
 const LOCAL_CACHE_KEY = 'life-proof-strength-block-v2-cache'
 
-type Tier = 'A' | 'B' | 'C'
-type BackStatus = 'green' | 'yellow' | 'red'
-type AuthMode = 'password' | 'otp'
-
-interface Exercise {
-  id: string
-  name: string
-  load: string
-  prescription: string
-}
-
-interface SessionConfig {
-  name: string
-  focus: string
-  exercises: Exercise[]
-  tierC: string[]
-  tierB: string[]
-  tierA: string[]
-}
-
-interface SetRow {
-  reps: string
-  load: string
-  rpe: string
-  done: boolean
-}
-
-interface LogEntry {
-  date: string
-  week: number
-  session: number
-  tier: Tier
-  backStatus: BackStatus
-  energy: number
-  minutesAvailable: number
-  checklistCompleted: number
-  mainLiftDone: boolean
-  exerciseSetCount: number
-  note: string
-  workoutKey: string
-}
-
-interface DailyRoutineTrack {
-  committed: boolean
-  morningResetDone: boolean
-  snacks: Record<number, boolean>
-}
-
-interface AppState {
-  week: number
-  nextSession: number
-  timeTier: Tier
-  minutesAvailable: number
-  backStatus: BackStatus
-  energy: number
-  notes: string
-  logs: LogEntry[]
-  coreDays: Record<string, boolean>
-  dailyRoutineByDate: Record<string, DailyRoutineTrack>
-  sessionConfigs: Record<number, SessionConfig>
-  setLogsByKey: Record<string, Record<string, SetRow[]>>
-  checksByKey: Record<string, Record<number, boolean>>
-}
-
-interface Recommendation {
-  tier: Tier
-  session: number
-  note: string
-}
-
-const tierToMinutesMap: Record<Tier, number> = {
-  C: 30,
-  B: 50,
-  A: 80,
-}
-
-const tierDescriptions: Record<Tier, string> = {
-  C: 'Tier C (25-35 min)',
-  B: 'Tier B (45-60 min)',
-  A: 'Tier A (75+ min)',
-}
-
-const DAILY_SNACK_SLOTS = 6
-
-const defaultSessionConfigs: Record<number, SessionConfig> = {
-  1: {
-    name: 'Session 1 - Brace + Pull',
-    focus: 'Core Base first, then pull work if tolerated',
-    exercises: [
-      { id: 's1e1', name: 'RKC plank', load: '', prescription: '3 x 15-25 sec (Core Base)' },
-      {
-        id: 's1e2',
-        name: 'Dead bug (band/cable pulldown)',
-        load: '',
-        prescription: '3 x 6/side, slow tempo (Core Base)',
-      },
-      { id: 's1e3', name: 'Suitcase carry', load: 'Heavy DB/KB', prescription: '3 x 30-45 sec/side (Core Base)' },
-      {
-        id: 's1e4',
-        name: 'Pull-up variation',
-        load: 'Tier A: weighted / Tier B: BW',
-        prescription: 'Tier A: 4-6 x 3-6, Tier B: 3-4 sets with 2 reps in reserve',
-      },
-    ],
-    tierC: [
-      'Do Core Base only (required) before any lifting decisions',
-      'Skip lifting and add 10-20 min easy walk',
-      'If symptoms ramp up next morning, stay Tier C for 48-72h',
-    ],
-    tierB: ['After Core Base: bodyweight pull-ups for 3-4 sets, leave 2 reps in reserve'],
-    tierA: ['After Core Base: weighted pull-ups for 4-6 sets of 3-6 reps'],
+const backStatusThemes: Record<BackStatus, { badge: string; panel: string; note: string }> = {
+  green: {
+    badge: 'border-emerald-200 bg-emerald-50 text-emerald-900',
+    panel: 'border-emerald-200 bg-emerald-50/70',
+    note: 'Green light',
   },
-  2: {
-    name: 'Session 2 - Anti-rotation + Push',
-    focus: 'Core Base first, then push bonus',
-    exercises: [
-      { id: 's2e1', name: 'Pallof press', load: 'Band/cable', prescription: '3 x 8/side with 2-sec hold (Core Base)' },
-      { id: 's2e2', name: 'Side plank row', load: 'Band/cable', prescription: '3 x 8/side (Core Base)' },
-      {
-        id: 's2e3',
-        name: 'Front rack carry (or heavy farmer carry)',
-        load: 'Heavy',
-        prescription: '3 x 30-45 sec (Core Base)',
-      },
-      {
-        id: 's2e4',
-        name: 'Push variation',
-        load: 'Tier A: weighted dips / Tier B: dips or push-ups',
-        prescription: 'Tier A: 4-6 x 3-6, Tier B: 3-4 sets with 2 reps in reserve',
-      },
-    ],
-    tierC: [
-      'Do Core Base only (required)',
-      'Skip lifting, add one extra Pallof round + easy walk',
-      'Keep pain <= 3/10 during and next day',
-    ],
-    tierB: ['After Core Base: dips or push-ups for 3-4 sets with 2 reps in reserve'],
-    tierA: ['After Core Base: weighted dips for 4-6 sets of 3-6 reps'],
+  yellow: {
+    badge: 'border-amber-200 bg-amber-50 text-amber-900',
+    panel: 'border-amber-200 bg-amber-50/70',
+    note: 'Caution day',
   },
-  3: {
-    name: 'Session 3 - Hinge Tolerance + Legs',
-    focus: 'Back-friendly lower exposure, no RDLs',
-    exercises: [
-      { id: 's3e1', name: 'McGill curl-up', load: '', prescription: '5 x 10-sec holds (Core Base)' },
-      { id: 's3e2', name: 'Bird dog', load: '', prescription: '6/side with 5-sec holds (Core Base)' },
-      {
-        id: 's3e3',
-        name: 'Hip-driven back extension',
-        load: 'Bodyweight or light',
-        prescription: '3 x 8-12, smooth reps, stop before pinch (Core Base)',
-      },
-      {
-        id: 's3e4',
-        name: 'Squat variation',
-        load: 'Tier A: tempo squat / Tier B: goblet + split squat',
-        prescription: 'Tier A: 4 x 3-6, Tier B: 3 x 8-10 + 2-3 x 8/side',
-      },
-    ],
-    tierC: [
-      'Do Core Base only, no squats if back is not happy',
-      'Swap lifting for 15-25 min incline walk',
-      'No RDLs for now',
-    ],
-    tierB: ['After Core Base: goblet squat 3 x 8-10 + split squat 2-3 x 8/side'],
-    tierA: ['After Core Base: tempo squat (3-sec down + 1-sec pause) 4 x 3-6, stop before butt-wink'],
-  },
-  4: {
-    name: 'Session 4 - Mixed Core + Capacity',
-    focus: 'Bulletproofing: anti-rotation, carries, and easy capacity',
-    exercises: [
-      { id: 's4e1', name: 'Cable chop hold', load: 'Cable/band', prescription: '3 x 20 sec/side (Core Base)' },
-      { id: 's4e2', name: 'Side plank', load: '', prescription: '2 x 30-45 sec/side (Core Base)' },
-      {
-        id: 's4e3',
-        name: 'Carry ladder',
-        load: 'Suitcase / farmer / front rack',
-        prescription: '10 min rotating carries (Core Base)',
-      },
-      {
-        id: 's4e4',
-        name: 'Capacity option',
-        load: 'Tier A: light cali / Tier B: simple circuit',
-        prescription: 'Tier A: technique/volume cali, Tier B: 12-15 min push-ups -> rows -> carries',
-      },
-    ],
-    tierC: ['Do Core Base only, then walk', 'Tier C still counts as a win'],
-    tierB: ['After Core Base: 12-15 min circuit (not to failure): push-ups -> rows -> carries'],
-    tierA: ['After Core Base: lighter technique/volume cali (ex: muscle-up practice + easy pull/push volume)'],
+  red: {
+    badge: 'border-rose-200 bg-rose-50 text-rose-900',
+    panel: 'border-rose-200 bg-rose-50/70',
+    note: 'Recovery mode',
   },
 }
 
-function cloneSessionConfigs(configs: Record<number, SessionConfig>): Record<number, SessionConfig> {
-  return Object.fromEntries(
-    Object.entries(configs).map(([sessionNum, cfg]) => [
-      Number(sessionNum),
-      {
-        ...cfg,
-        exercises: cfg.exercises.map((exercise) => ({ ...exercise })),
-        tierA: [...cfg.tierA],
-        tierB: [...cfg.tierB],
-        tierC: [...cfg.tierC],
-      },
-    ]),
-  ) as Record<number, SessionConfig>
-}
-
-function containsLegacyTemplateData(configs: Record<number, SessionConfig>): boolean {
-  const legacyMarkers = [
-    'Session 1 - Pull + Core',
-    'Session 2 - Lower + Push',
-    'Session 3 - Muscle-Up Skill + Pull',
-    'Session 4 - Push + Lower + Core',
-    'Weighted Pull-ups',
-    'Bodyweight Pull-up Back-off',
-    'Row Variation',
-    'Core (Side plank + Bird dog)',
-    'Main lift only + core minimum',
-  ]
-
-  return Object.values(configs).some((cfg) => {
-    if (legacyMarkers.some((marker) => cfg.name.includes(marker) || cfg.focus.includes(marker))) {
-      return true
-    }
-
-    if (cfg.tierA.concat(cfg.tierB, cfg.tierC).some((rule) => legacyMarkers.some((marker) => rule.includes(marker)))) {
-      return true
-    }
-
-    return cfg.exercises.some((exercise) =>
-      legacyMarkers.some(
-        (marker) => exercise.name.includes(marker) || exercise.load.includes(marker) || exercise.prescription.includes(marker),
-      ),
-    )
-  })
-}
-
-function normalizeSessionConfigs(raw: Partial<Record<number, SessionConfig>> | undefined): Record<number, SessionConfig> {
-  const merged = {
-    ...cloneSessionConfigs(defaultSessionConfigs),
-    ...(raw ?? {}),
-  } as Record<number, SessionConfig>
-
-  if (containsLegacyTemplateData(merged)) {
-    return cloneSessionConfigs(defaultSessionConfigs)
-  }
-
-  return merged
-}
-
-const defaultState: AppState = {
-  week: 1,
-  nextSession: 1,
-  timeTier: 'C',
-  minutesAvailable: tierToMinutesMap.C,
-  backStatus: 'green',
-  energy: 3,
-  notes: '',
-  logs: [],
-  coreDays: {},
-  dailyRoutineByDate: {},
-  sessionConfigs: cloneSessionConfigs(defaultSessionConfigs),
-  setLogsByKey: {},
-  checksByKey: {},
-}
-
-function getTierFromTime(minutes: number): Tier {
-  if (minutes >= 75) return 'A'
-  if (minutes >= 45) return 'B'
-  return 'C'
-}
-
-function minutesFromTier(tier: Tier) {
-  return tierToMinutesMap[tier]
-}
-
-function normalizeTier(value: unknown, fallback: Tier = 'C'): Tier {
-  return value === 'A' || value === 'B' || value === 'C' ? value : fallback
-}
-
-function makeDefaultSnackChecks(): Record<number, boolean> {
-  const snacks: Record<number, boolean> = {}
-  for (let idx = 0; idx < DAILY_SNACK_SLOTS; idx += 1) {
-    snacks[idx] = false
-  }
-  return snacks
-}
-
-function normalizeSnackChecks(raw: unknown): Record<number, boolean> {
-  const normalized = makeDefaultSnackChecks()
-
-  if (!raw || typeof raw !== 'object') {
-    return normalized
-  }
-
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    const idx = Number(key)
-    if (Number.isNaN(idx) || idx < 0 || idx >= DAILY_SNACK_SLOTS) {
-      continue
-    }
-
-    normalized[idx] = value === true
-  }
-
-  return normalized
-}
-
-function normalizeDailyRoutineTrack(raw: unknown): DailyRoutineTrack {
-  const source = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
-  return {
-    committed: source.committed === true,
-    morningResetDone: source.morningResetDone === true,
-    snacks: normalizeSnackChecks(source.snacks),
-  }
-}
-
-function normalizeLoadedState(raw: Partial<AppState> | null | undefined): AppState {
-  if (!raw) {
-    return defaultState
-  }
-
-  const legacyMinutes = Number(raw.minutesAvailable || defaultState.minutesAvailable)
-  const inferredTier = getTierFromTime(legacyMinutes)
-  const timeTier = normalizeTier(raw.timeTier, inferredTier)
-  const rawDailyRoutine = raw.dailyRoutineByDate ?? {}
-  const dailyRoutineByDate = Object.fromEntries(
-    Object.entries(rawDailyRoutine).map(([date, routine]) => [date, normalizeDailyRoutineTrack(routine)]),
-  ) as Record<string, DailyRoutineTrack>
-
-  return {
-    ...defaultState,
-    ...raw,
-    timeTier,
-    minutesAvailable: minutesFromTier(timeTier),
-    dailyRoutineByDate,
-    sessionConfigs: normalizeSessionConfigs(raw.sessionConfigs),
-  }
-}
-
-function nextSessionNumber(current: number): number {
-  return current === 4 ? 1 : current + 1
-}
-
-function trailingDateKeys(days: number, endDate: string): string[] {
-  const base = new Date(`${endDate}T12:00:00`)
-  return Array.from({ length: days }, (_, idx) => {
-    const d = new Date(base)
-    d.setDate(base.getDate() - (days - 1 - idx))
-    return d.toISOString().slice(0, 10)
-  })
-}
-
-function getRecommendation({
-  selectedTier,
-  backStatus,
-  nextSession,
-  energy,
-}: {
-  selectedTier: Tier
-  backStatus: BackStatus
-  nextSession: number
-  energy: number
-}): Recommendation {
-  let adjustedTier: Tier = selectedTier
-  let note = ''
-  let sessionOverride: number | null = null
-
-  if (backStatus === 'red') {
-    adjustedTier = 'C'
-    note = 'Flare-up mode (48-72h): Tier C only. Do Core Base + walking. Skip heavy loading and deep bending.'
-    if (nextSession === 3) {
-      sessionOverride = 1
-      note += ' Suggested swap to Session 1 today.'
-    }
-  } else if (backStatus === 'yellow') {
-    if (selectedTier === 'A') adjustedTier = 'B'
-    note = 'Caution day: keep pain <= 3/10 during and next day, no spreading symptoms, and cap effort around RPE 6.'
-  } else {
-    note =
-      energy <= 2
-        ? 'Low energy day: complete Core Base and walk. Tier C still counts as a full win.'
-        : 'Green light: earn lifting by finishing Core Base first, then run your selected tier.'
-  }
-
-  return { tier: adjustedTier, session: sessionOverride ?? nextSession, note }
-}
-
-function uid() {
-  return Math.random().toString(36).slice(2, 9)
-}
-
-function todayDate() {
-  return new Date().toISOString().slice(0, 10)
-}
-
-function makeWorkoutKey(state: AppState, rec: Recommendation) {
-  return `${todayDate()}-W${state.week}-S${rec.session}-T${rec.tier}`
-}
-
-function blankSetRow(): SetRow {
-  return { reps: '', load: '', rpe: '', done: false }
-}
-
-function normalizeRangeText(value: string) {
-  return value.replace(/[\u2013\u2014]/g, '-').replace(/\s+/g, '')
-}
-
-function inferRepsFromPrescription(prescription: string): string {
-  if (!prescription.trim()) {
-    return ''
-  }
-
-  const secondsMatch = prescription.match(/(\d+\s*(?:-|\u2013)\s*\d+|\d+)\s*(?:s|sec|seconds?)\b/i)
-  if (secondsMatch?.[1]) {
-    return `${normalizeRangeText(secondsMatch[1])}S`
-  }
-
-  const repsAfterX = prescription.match(/[x\u00D7]\s*([0-9]+(?:\s*(?:-|\u2013)\s*[0-9]+)?(?:\s*\+\s*[0-9]+)?)/i)
-  if (repsAfterX?.[1]) {
-    return normalizeRangeText(repsAfterX[1])
-  }
-
-  if (/\bsingle(s)?\b/i.test(prescription)) {
-    return '1'
-  }
-
-  return ''
-}
-
-function inferRpeFromPrescription(prescription: string): string {
-  const rpeMatch = prescription.match(/RPE\s*([0-9]+(?:\s*(?:-|\u2013)\s*[0-9]+)?)/i)
-  if (!rpeMatch?.[1]) {
-    return ''
-  }
-
-  const normalized = normalizeRangeText(rpeMatch[1])
-  return normalized.split('-')[0] ?? ''
-}
-
-function inferLoad(exercise: Exercise): string {
-  if (exercise.load.trim()) {
-    return exercise.load.trim()
-  }
-
-  const text = `${exercise.name} ${exercise.prescription}`.toLowerCase()
-  if (text.includes('bodyweight') || text.includes('bw')) {
-    return 'BW'
-  }
-
-  return ''
-}
-
-function prefilledSetFromTarget(exercise: Exercise): SetRow {
-  return {
-    reps: inferRepsFromPrescription(exercise.prescription),
-    load: inferLoad(exercise),
-    rpe: inferRpeFromPrescription(exercise.prescription),
-    done: false,
-  }
+const logTypeThemes: Record<LogType, { badge: string; panel: string }> = {
+  full: {
+    badge: 'border-sky-200 bg-sky-50 text-sky-900',
+    panel: 'border-sky-200 bg-sky-50/70',
+  },
+  core_only: {
+    badge: 'border-teal-200 bg-teal-50 text-teal-900',
+    panel: 'border-teal-200 bg-teal-50/70',
+  },
+  recovery_substitute: {
+    badge: 'border-rose-200 bg-rose-50 text-rose-900',
+    panel: 'border-rose-200 bg-rose-50/70',
+  },
 }
 
 function readCachedState(): AppState | null {
@@ -500,9 +99,48 @@ function readCachedState(): AppState | null {
   }
 }
 
+function getTodayStatus(log: LogEntry | null, hasPartialWorkoutData: boolean, hasRoutineData: boolean) {
+  if (log) {
+    return {
+      label: getCompletionStatusLabel(log),
+      detail:
+        log.type === 'core_only'
+          ? 'You banked a win without advancing the rotation.'
+          : 'Today is closed out and saved in history.',
+      className: logTypeThemes[log.type].badge,
+    }
+  }
+
+  if (hasPartialWorkoutData || hasRoutineData) {
+    return {
+      label: 'In progress',
+      detail: 'You have partial data today. Finish the session or save a core-only win.',
+      className: 'border-slate-200 bg-slate-100 text-slate-800',
+    }
+  }
+
+  return {
+    label: 'Open',
+    detail: 'No win logged yet today.',
+    className: 'border-slate-200 bg-white text-slate-700',
+  }
+}
+
+function describeHistoryLog(log: LogEntry) {
+  if (log.type === 'core_only') {
+    return `Held S${log.plannedSession} in place and saved a core-only win`
+  }
+
+  if (log.type === 'recovery_substitute') {
+    return `Planned S${log.plannedSession}, completed S${log.completedSession} as a recovery substitute`
+  }
+
+  return `Completed S${log.completedSession} and advanced the rotation`
+}
+
 export default function App() {
   const [state, setState] = useState<AppState>(() => readCachedState() ?? defaultState)
-  const [activeTab, setActiveTab] = useState('do')
+  const [activeTab, setActiveTab] = useState('today')
 
   const [session, setSession] = useState<Session | null>(null)
   const [authMode, setAuthMode] = useState<AuthMode>('password')
@@ -540,7 +178,7 @@ export default function App() {
 
       if (error && error.code !== 'PGRST116') {
         console.error(error)
-        setAuthMessage('Connected, but could not load cloud state. Check table name/policies.')
+        setAuthMessage('Connected, but could not load cloud state. Check table name and policies.')
       }
 
       const remoteState = (data?.state as Partial<AppState> | null) ?? null
@@ -660,22 +298,17 @@ export default function App() {
     [state.timeTier, state.backStatus, state.nextSession, state.energy],
   )
 
-  const workoutKey = makeWorkoutKey(state, recommendation)
+  const today = todayDate()
+  const workoutKey = makeWorkoutKey(today, state.week, recommendation.plannedSession)
   const activeSessionConfig = state.sessionConfigs[recommendation.session]
   const checklist = state.checksByKey[workoutKey] || {}
   const setLogs = state.setLogsByKey[workoutKey] || {}
-  const today = todayDate()
-
-  const weekLogs = state.logs.filter((log) => log.week === state.week)
-  const weekProgress = Math.min(100, (weekLogs.length / 4) * 100)
-  const coreCount = Object.values(state.coreDays).filter(Boolean).length
-
-  const tierKey: 'tierA' | 'tierB' | 'tierC' =
-    recommendation.tier === 'A' ? 'tierA' : recommendation.tier === 'B' ? 'tierB' : 'tierC'
-  const tierRules = activeSessionConfig[tierKey] || []
   const coreBaseExercises = activeSessionConfig.exercises.slice(0, 3)
   const todayRoutine = normalizeDailyRoutineTrack(state.dailyRoutineByDate[today])
   const snacksDone = Object.values(todayRoutine.snacks).filter(Boolean).length
+  const weekStats = useMemo(() => getWeekStats(state.logs, state.week), [state.logs, state.week])
+  const todayLog = useMemo(() => state.logs.find((log) => log.localDate === today) ?? null, [state.logs, today])
+
   const weeklySummary = useMemo(() => {
     const dates = trailingDateKeys(7, today)
     let committedDays = 0
@@ -709,6 +342,18 @@ export default function App() {
       snackProgress: Math.min(100, Math.round((snackCount / 21) * 100)),
     }
   }, [state.dailyRoutineByDate, today])
+
+  const hasPartialWorkoutData =
+    Boolean(state.coreDays[today]) || Object.values(checklist).some(Boolean) || countLoggedSets(setLogs) > 0
+  const hasRoutineData = todayRoutine.committed || todayRoutine.morningResetDone || snacksDone > 0
+  const todayStatus = getTodayStatus(todayLog, hasPartialWorkoutData, hasRoutineData)
+
+  const dayHasClosedWin = todayLog !== null && todayLog.type !== 'core_only'
+  const canUpgradeCoreOnly = todayLog?.type === 'core_only' && todayLog.workoutKey === workoutKey
+
+  const tierKey: 'tierA' | 'tierB' | 'tierC' =
+    recommendation.tier === 'A' ? 'tierA' : recommendation.tier === 'B' ? 'tierB' : 'tierC'
+  const tierRules = activeSessionConfig[tierKey] || []
 
   const updateState = (patch: Partial<AppState>) => setState((current) => ({ ...current, ...patch }))
 
@@ -835,15 +480,14 @@ export default function App() {
     }))
   }
 
-  const updateTodayRoutine = (updater: (routine: DailyRoutineTrack) => DailyRoutineTrack) => {
-    const day = todayDate()
+  const updateTodayRoutine = (updater: (routine: { committed: boolean; morningResetDone: boolean; snacks: Record<number, boolean> }) => { committed: boolean; morningResetDone: boolean; snacks: Record<number, boolean> }) => {
     setState((current) => {
-      const existing = normalizeDailyRoutineTrack(current.dailyRoutineByDate[day])
+      const existing = normalizeDailyRoutineTrack(current.dailyRoutineByDate[today])
       return {
         ...current,
         dailyRoutineByDate: {
           ...current.dailyRoutineByDate,
-          [day]: updater(existing),
+          [today]: updater(existing),
         },
       }
     })
@@ -882,55 +526,147 @@ export default function App() {
     updateTodayRoutine((routine) => ({ ...routine, snacks: makeDefaultSnackChecks() }))
   }
 
-  const markCoreDay = () => {
-    const day = todayDate()
+  const toggleCoreDay = () => {
     setState((current) => ({
       ...current,
-      coreDays: { ...current.coreDays, [day]: !current.coreDays[day] },
+      coreDays: { ...current.coreDays, [today]: !current.coreDays[today] },
     }))
   }
 
   const completeSession = () => {
-    const checkCount = Object.values(checklist).filter(Boolean).length
-    const exerciseSetCount = Object.values(setLogs).reduce((sum, rows) => sum + rows.length, 0)
-    const day = todayDate()
-    const logEntry: LogEntry = {
-      date: day,
-      week: state.week,
-      session: recommendation.session,
-      tier: recommendation.tier,
-      backStatus: state.backStatus,
-      energy: state.energy,
-      minutesAvailable: minutesFromTier(state.timeTier),
-      checklistCompleted: checkCount,
-      mainLiftDone: checkCount >= 1,
-      exerciseSetCount,
-      note: (state.notes || '').trim(),
-      workoutKey,
-    }
+    const actionDate = today
+    const actionWorkoutKey = workoutKey
+    const actionRecommendation = recommendation
+    const actionCheckCount = Object.values(checklist).filter(Boolean).length
+    const actionExerciseSetCount = countLoggedSets(setLogs)
+    const actionNote = state.notes.trim()
+    const actionWeek = state.week
+    const actionBackStatus = state.backStatus
+    const actionEnergy = state.energy
 
+    setState((current) => {
+      const existingLog = findLogByWorkoutKey(current.logs, actionWorkoutKey)
+      const existingTodayLog = current.logs.find((log) => log.localDate === actionDate) ?? null
+      if (existingTodayLog && existingTodayLog.workoutKey !== actionWorkoutKey) {
+        return current
+      }
+      if (existingLog?.type === 'full' || existingLog?.type === 'recovery_substitute') {
+        return current
+      }
+
+      const nextLog: LogEntry = {
+        id: existingLog?.id ?? `${actionWorkoutKey}-${uid()}`,
+        workoutKey: actionWorkoutKey,
+        localDate: actionDate,
+        week: actionWeek,
+        type: actionRecommendation.completionType,
+        plannedSession: actionRecommendation.plannedSession,
+        completedSession: actionRecommendation.session,
+        tier: actionRecommendation.tier,
+        backStatus: actionBackStatus,
+        energy: actionEnergy,
+        exerciseSetCount: actionExerciseSetCount,
+        checklistCompleted: actionCheckCount,
+        rotationAdvanced: actionRecommendation.rotationAdvancedOnComplete,
+        note: actionNote,
+      }
+
+      const shouldAdvance = nextLog.rotationAdvanced && !existingLog?.rotationAdvanced
+
+      return {
+        ...current,
+        logs: upsertLogEntry(current.logs, nextLog),
+        nextSession: shouldAdvance ? nextSessionNumber(current.nextSession) : current.nextSession,
+        notes: '',
+        coreDays: { ...current.coreDays, [actionDate]: true },
+        dailyRoutineByDate: {
+          ...current.dailyRoutineByDate,
+          [actionDate]: {
+            ...normalizeDailyRoutineTrack(current.dailyRoutineByDate[actionDate]),
+            committed: true,
+          },
+        },
+      }
+    })
+  }
+
+  const saveCoreOnlyWin = () => {
+    const actionDate = today
+    const actionWorkoutKey = workoutKey
+    const actionRecommendation = recommendation
+    const actionCheckCount = Object.values(checklist).filter(Boolean).length
+    const actionExerciseSetCount = countLoggedSets(setLogs)
+    const actionNote = state.notes.trim()
+    const actionWeek = state.week
+    const actionBackStatus = state.backStatus
+    const actionEnergy = state.energy
+
+    setState((current) => {
+      const existingLog = findLogByWorkoutKey(current.logs, actionWorkoutKey)
+      const existingTodayLog = current.logs.find((log) => log.localDate === actionDate) ?? null
+      if (existingTodayLog && existingTodayLog.workoutKey !== actionWorkoutKey) {
+        return current
+      }
+      if (existingLog && existingLog.type !== 'core_only') {
+        return current
+      }
+
+      const nextLog: LogEntry = {
+        id: existingLog?.id ?? `${actionWorkoutKey}-${uid()}`,
+        workoutKey: actionWorkoutKey,
+        localDate: actionDate,
+        week: actionWeek,
+        type: 'core_only',
+        plannedSession: actionRecommendation.plannedSession,
+        completedSession: actionRecommendation.session,
+        tier: actionRecommendation.tier,
+        backStatus: actionBackStatus,
+        energy: actionEnergy,
+        exerciseSetCount: actionExerciseSetCount,
+        checklistCompleted: actionCheckCount,
+        rotationAdvanced: false,
+        note: actionNote,
+      }
+
+      return {
+        ...current,
+        logs: upsertLogEntry(current.logs, nextLog),
+        notes: '',
+        coreDays: { ...current.coreDays, [actionDate]: true },
+        dailyRoutineByDate: {
+          ...current.dailyRoutineByDate,
+          [actionDate]: {
+            ...normalizeDailyRoutineTrack(current.dailyRoutineByDate[actionDate]),
+            committed: true,
+          },
+        },
+      }
+    })
+  }
+
+  const advanceWeek = () => {
     setState((current) => ({
       ...current,
-      logs: [logEntry, ...current.logs].slice(0, 120),
-      nextSession: nextSessionNumber(current.nextSession),
+      week: current.week >= 4 ? 1 : current.week + 1,
       notes: '',
-      coreDays: { ...current.coreDays, [day]: true },
-      dailyRoutineByDate: {
-        ...current.dailyRoutineByDate,
-        [day]: {
-          ...normalizeDailyRoutineTrack(current.dailyRoutineByDate[day]),
-          committed: true,
-        },
-      },
+      coreDays: {},
     }))
   }
 
   const resetBlock = () => {
+    if (!window.confirm('Reset the full block, including logs, today state, and session templates?')) {
+      return
+    }
+
     setState(defaultState)
-    setActiveTab('do')
+    setActiveTab('today')
   }
 
   const resetSessionTemplatesToCoreFirst = () => {
+    if (!window.confirm('Reset all session templates back to the core-first defaults?')) {
+      return
+    }
+
     setState((current) => ({
       ...current,
       sessionConfigs: cloneSessionConfigs(defaultSessionConfigs),
@@ -1012,15 +748,14 @@ export default function App() {
     return (
       <div className="min-h-screen bg-slate-50 p-4 md:p-6">
         <div className="mx-auto max-w-2xl">
-          <Card className="rounded-2xl shadow-sm">
+          <Card className="rounded-3xl shadow-sm">
             <CardHeader>
               <CardTitle>Supabase Setup Required</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm text-slate-700">
-              <p>This build now requires Supabase for authentication and cloud persistence.</p>
+              <p>This build requires Supabase for authentication and cloud persistence.</p>
               <p>
-                Add these environment variables and restart dev server: <code>VITE_SUPABASE_URL</code>,{' '}
-                <code>VITE_SUPABASE_ANON_KEY</code>.
+                Add <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code>, then restart the dev server.
               </p>
               <p>
                 Optional table override: <code>VITE_SUPABASE_STATE_TABLE</code> (default: <code>training_state</code>).
@@ -1036,7 +771,7 @@ export default function App() {
     return (
       <div className="min-h-screen bg-slate-50 p-4 md:p-6">
         <div className="mx-auto max-w-2xl">
-          <Card className="rounded-2xl shadow-sm">
+          <Card className="rounded-3xl shadow-sm">
             <CardHeader>
               <CardTitle>Loading...</CardTitle>
             </CardHeader>
@@ -1049,12 +784,12 @@ export default function App() {
 
   if (!session) {
     return (
-      <div className="min-h-screen bg-slate-50 p-4 md:p-6">
+      <div className="min-h-screen bg-[linear-gradient(180deg,#fefce8_0%,#f8fafc_42%,#f1f5f9_100%)] p-4 md:p-6">
         <div className="mx-auto max-w-md">
-          <Card className="rounded-2xl shadow-sm">
+          <Card className="rounded-3xl border-slate-200 shadow-sm">
             <CardHeader>
               <CardTitle>Sign In</CardTitle>
-              <p className="text-sm text-slate-600">Use email + password or email magic link.</p>
+              <p className="text-sm text-slate-600">Use email + password or a magic link.</p>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
@@ -1132,7 +867,7 @@ export default function App() {
     return (
       <div className="min-h-screen bg-slate-50 p-4 md:p-6">
         <div className="mx-auto max-w-2xl">
-          <Card className="rounded-2xl shadow-sm">
+          <Card className="rounded-3xl shadow-sm">
             <CardHeader>
               <CardTitle>Loading Training Data...</CardTitle>
             </CardHeader>
@@ -1144,415 +879,602 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4 md:p-6">
-      <div className="mx-auto max-w-5xl space-y-4">
-        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-          <Card className="rounded-2xl shadow-sm">
-            <CardHeader>
-              <CardTitle className="flex items-center justify-between gap-2 text-xl md:text-2xl">
-                <span className="flex items-center gap-2">
-                  <Dumbbell className="h-5 w-5" /> Life-Proof Strength Core-First
-                </span>
-                <Badge variant="secondary">Week {state.week} / 4</Badge>
-              </CardTitle>
-              <p className="text-sm text-slate-600">Earn the right to lift: Core Base first. Tier work is bonus.</p>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-white p-3 text-sm">
-                <div className="text-slate-700">
-                  Signed in as <b>{session.user.email}</b>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-500">{isSyncing ? 'Syncing...' : 'Cloud sync on'}</span>
-                  <Button variant="outline" size="sm" className="rounded-xl" onClick={signOut}>
-                    <LogOut className="mr-2 h-4 w-4" /> Sign out
-                  </Button>
-                </div>
-              </div>
-
-              {authMessage ? (
-                <div className="rounded-xl border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
-                  {authMessage}
-                </div>
-              ) : null}
-
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label>How much time do I have?</Label>
-                  <div className="flex flex-wrap gap-2">
-                    {(['C', 'B', 'A'] as Tier[]).map((tier) => (
-                      <Button
-                        key={tier}
-                        type="button"
-                        variant={state.timeTier === tier ? 'default' : 'outline'}
-                        className="rounded-xl"
-                        onClick={() => selectTimeTier(tier)}
-                      >
-                        {tierDescriptions[tier]}
-                      </Button>
-                    ))}
-                  </div>
-                  <p className="text-xs text-slate-500">Tap one option. No numeric entry needed.</p>
-                </div>
-                <div className="space-y-2">
-                  <Label>Back status</Label>
-                  <div className="flex flex-wrap gap-2">
-                    {[
-                      ['green', 'Green'],
-                      ['yellow', 'Yellow'],
-                      ['red', 'Red'],
-                    ].map(([key, label]) => (
-                      <Button
-                        key={key}
-                        type="button"
-                        variant={state.backStatus === key ? 'default' : 'outline'}
-                        className="rounded-xl"
-                        onClick={() => updateState({ backStatus: key as BackStatus })}
-                      >
-                        {label}
-                      </Button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label>Energy (1-5)</Label>
-                  <div className="flex gap-2">
-                    {[1, 2, 3, 4, 5].map((n) => (
-                      <Button
-                        key={n}
-                        type="button"
-                        variant={state.energy === n ? 'default' : 'outline'}
-                        className="h-9 w-9 rounded-full p-0"
-                        onClick={() => updateState({ energy: n })}
-                      >
-                        {n}
-                      </Button>
-                    ))}
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label>Next session in rotation</Label>
-                  <div className="flex flex-wrap gap-2">
-                    {[1, 2, 3, 4].map((n) => (
-                      <Button
-                        key={n}
-                        type="button"
-                        variant={state.nextSession === n ? 'default' : 'outline'}
-                        className="rounded-xl"
-                        onClick={() => updateState({ nextSession: n })}
-                      >
-                        S{n}
-                      </Button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border bg-white p-3">
-                <div className="flex items-center justify-between gap-2">
+    <div className="min-h-screen bg-[linear-gradient(180deg,#fff7ed_0%,#f8fafc_38%,#eef2ff_100%)] p-4 pb-28 md:p-6 md:pb-8">
+      <div className="mx-auto max-w-6xl space-y-4">
+        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+          <Card className="overflow-hidden rounded-[28px] border-slate-200 shadow-sm">
+            <div className="border-b border-slate-200 bg-[radial-gradient(circle_at_top_left,#fef3c7,transparent_42%),radial-gradient(circle_at_top_right,#dbeafe,transparent_38%),linear-gradient(180deg,#ffffff,rgba(255,255,255,0.94))]">
+              <CardHeader className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-medium text-slate-900">Win condition</div>
-                    <div className="text-sm text-slate-600">4 Core Bases/week + daily morning reset + movement snacks</div>
+                    <CardTitle className="flex items-center gap-2 text-2xl md:text-3xl">
+                      <Dumbbell className="h-6 w-6" /> Life-Proof Strength
+                    </CardTitle>
+                    <p className="mt-2 text-sm text-slate-700">
+                      Daily decision support for training around symptoms. Core Base first, lifting only when earned.
+                    </p>
                   </div>
-                  <Button
-                    variant="outline"
-                    className="rounded-xl"
-                    onClick={() => updateState({ week: state.week >= 4 ? 1 : state.week + 1, coreDays: {} })}
-                  >
-                    Advance Week
-                  </Button>
-                </div>
-                <div className="mt-3 space-y-2">
-                  <div className="flex items-center justify-between text-xs text-slate-600">
-                    <span>Sessions this week (target 4)</span>
-                    <span>{Math.round(weekProgress)}%</span>
-                  </div>
-                  <Progress value={weekProgress} />
-                  <div className="flex items-center justify-between text-xs text-slate-600">
-                    <span>Core Base days (target 4)</span>
-                    <span>{coreCount}</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary" className="rounded-full bg-white/80 px-3 py-1 text-slate-900">
+                      Week {state.week} / 4
+                    </Badge>
+                    <Badge variant="outline" className={`rounded-full px-3 py-1 ${todayStatus.className}`}>
+                      {todayStatus.label}
+                    </Badge>
                   </div>
                 </div>
-              </div>
 
-              <div className="rounded-2xl border bg-white p-3">
-                <div className="text-sm font-medium text-slate-900">Weekly Routine Summary (last 7 days)</div>
-                <div className="mt-3 space-y-2">
-                  <div className="flex items-center justify-between text-xs text-slate-600">
-                    <span>Committed days (target 7)</span>
-                    <span>{weeklySummary.committedDays}/7</span>
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/60 bg-white/80 p-3 text-sm backdrop-blur">
+                  <div className="text-slate-700">
+                    Signed in as <b>{session.user.email}</b>
                   </div>
-                  <Progress value={weeklySummary.commitProgress} />
-
-                  <div className="flex items-center justify-between text-xs text-slate-600">
-                    <span>Morning resets (target 7)</span>
-                    <span>{weeklySummary.morningResetDays}/7</span>
-                  </div>
-                  <Progress value={weeklySummary.morningProgress} />
-
-                  <div className="flex items-center justify-between text-xs text-slate-600">
-                    <span>Movement snacks (baseline target 21)</span>
-                    <span>{weeklySummary.snackCount}/21</span>
-                  </div>
-                  <Progress value={weeklySummary.snackProgress} />
-
-                  <div className="text-xs text-slate-500">
-                    Days with 3+ snacks: {weeklySummary.snackDaysAtLeastThree}/7
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-500">{isSyncing ? 'Syncing...' : 'Cloud sync on'}</span>
+                    <Button variant="outline" size="sm" className="rounded-xl" onClick={signOut}>
+                      <LogOut className="mr-2 h-4 w-4" /> Sign out
+                    </Button>
                   </div>
                 </div>
-              </div>
-            </CardContent>
+
+                {authMessage ? (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    {authMessage}
+                  </div>
+                ) : null}
+
+                <div className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
+                  <div className="space-y-4 rounded-[24px] border border-white/70 bg-white/85 p-4 backdrop-blur">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
+                          Today&apos;s Check-In
+                        </div>
+                        <p className="mt-1 text-sm text-slate-600">{todayStatus.detail}</p>
+                      </div>
+                      <Badge variant="outline" className={`rounded-full px-3 py-1 ${backStatusThemes[state.backStatus].badge}`}>
+                        {backStatusThemes[state.backStatus].note}
+                      </Badge>
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-3">
+                      <div className="space-y-2">
+                        <Label>Time available</Label>
+                        <div className="flex flex-wrap gap-2">
+                          {(['C', 'B', 'A'] as Tier[]).map((tier) => (
+                            <Button
+                              key={tier}
+                              type="button"
+                              variant={state.timeTier === tier ? 'default' : 'outline'}
+                              className="rounded-xl"
+                              onClick={() => selectTimeTier(tier)}
+                            >
+                              {tier}
+                            </Button>
+                          ))}
+                        </div>
+                        <p className="text-xs text-slate-500">{tierDescriptions[state.timeTier]}</p>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label>Back status</Label>
+                        <div className="flex flex-wrap gap-2">
+                          {([
+                            ['green', 'Green'],
+                            ['yellow', 'Yellow'],
+                            ['red', 'Red'],
+                          ] as Array<[BackStatus, string]>).map(([key, label]) => (
+                            <Button
+                              key={key}
+                              type="button"
+                              variant={state.backStatus === key ? 'default' : 'outline'}
+                              className="rounded-xl"
+                              onClick={() => updateState({ backStatus: key })}
+                            >
+                              {label}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label>Energy</Label>
+                        <div className="flex gap-2">
+                          {[1, 2, 3, 4, 5].map((n) => (
+                            <Button
+                              key={n}
+                              type="button"
+                              variant={state.energy === n ? 'default' : 'outline'}
+                              className="h-10 w-10 rounded-full p-0"
+                              onClick={() => updateState({ energy: n })}
+                            >
+                              {n}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className={`rounded-[22px] border p-4 ${backStatusThemes[recommendation.severity].panel}`}>
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-500">
+                            Recommendation
+                          </div>
+                          <div className="mt-1 text-xl font-semibold text-slate-950">{activeSessionConfig.name}</div>
+                          <p className="mt-1 text-sm text-slate-700">{activeSessionConfig.focus}</p>
+                        </div>
+                        <div className="space-y-2 text-right">
+                          <Badge variant="outline" className="rounded-full px-3 py-1 bg-white/80">
+                            Tier {recommendation.tier}
+                          </Badge>
+                          <div className="text-xs text-slate-600">
+                            Planned S{recommendation.plannedSession}
+                            {recommendation.session !== recommendation.plannedSession
+                              ? ` -> Running S${recommendation.session}`
+                              : ''}
+                          </div>
+                        </div>
+                      </div>
+                      <p className="mt-3 text-sm font-medium text-slate-800">{recommendation.note}</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 rounded-[24px] border border-white/70 bg-slate-950 p-4 text-white shadow-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-400">This Week</div>
+                        <p className="mt-1 text-sm text-slate-300">Wins count even if the day is core-only.</p>
+                      </div>
+                      <Button variant="secondary" size="sm" className="rounded-xl bg-white text-slate-950 hover:bg-slate-100" onClick={advanceWeek}>
+                        Advance week
+                      </Button>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-sm text-slate-200">
+                        <span>Weekly wins</span>
+                        <span>{weekStats.wins}/4</span>
+                      </div>
+                      <Progress value={weekStats.progress} className="bg-slate-700" />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="rounded-2xl bg-white/10 p-3">
+                        <div className="text-xs uppercase tracking-[0.14em] text-slate-400">Full sessions</div>
+                        <div className="mt-1 text-2xl font-semibold">{weekStats.fullSessions}</div>
+                      </div>
+                      <div className="rounded-2xl bg-white/10 p-3">
+                        <div className="text-xs uppercase tracking-[0.14em] text-slate-400">Core-only wins</div>
+                        <div className="mt-1 text-2xl font-semibold">{weekStats.coreOnlyWins}</div>
+                      </div>
+                      <div className="rounded-2xl bg-white/10 p-3">
+                        <div className="text-xs uppercase tracking-[0.14em] text-slate-400">Recovery subs</div>
+                        <div className="mt-1 text-2xl font-semibold">{weekStats.recoverySubs}</div>
+                      </div>
+                      <div className="rounded-2xl bg-white/10 p-3">
+                        <div className="text-xs uppercase tracking-[0.14em] text-slate-400">Next rotation slot</div>
+                        <div className="mt-1 text-2xl font-semibold">S{state.nextSession}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </CardHeader>
+            </div>
           </Card>
         </motion.div>
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-          <TabsList className="grid w-full grid-cols-3 rounded-2xl">
-            <TabsTrigger value="do">Do Workout</TabsTrigger>
-            <TabsTrigger value="log">Set/Rep Log</TabsTrigger>
-            <TabsTrigger value="edit">Edit Sessions</TabsTrigger>
+          <TabsList className="grid w-full grid-cols-3 rounded-2xl bg-white/80 p-1 shadow-sm backdrop-blur">
+            <TabsTrigger value="today" className="rounded-xl">
+              Today
+            </TabsTrigger>
+            <TabsTrigger value="history" className="rounded-xl">
+              History
+            </TabsTrigger>
+            <TabsTrigger value="templates" className="rounded-xl">
+              Templates
+            </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="do" className="space-y-4">
-            <Card className="rounded-2xl border-2 shadow-sm">
+          <TabsContent value="today" className="space-y-4">
+            <Card className={`rounded-[28px] border-2 shadow-sm ${backStatusThemes[recommendation.severity].panel}`}>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg md:text-xl">
-                  <Play className="h-5 w-5" /> Today&apos;s Recommendation
+                  <Play className="h-5 w-5" /> Today&apos;s Plan
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                  <div className="rounded-xl border p-3">
-                    <div className="text-xs text-slate-500">Workout</div>
-                    <div className="font-semibold">{activeSessionConfig.name}</div>
-                    <div className="text-sm text-slate-600">{activeSessionConfig.focus}</div>
-                  </div>
-                  <div className="rounded-xl border p-3">
-                    <div className="text-xs text-slate-500">Tier</div>
-                    <div className="font-semibold">Tier {recommendation.tier}</div>
-                    <div className="text-sm text-slate-600">Based on {tierDescriptions[state.timeTier]}</div>
-                  </div>
-                  <div className="rounded-xl border p-3">
-                    <div className="text-xs text-slate-500">Decision note</div>
-                    <div className="text-sm font-medium text-slate-800">{recommendation.note}</div>
-                  </div>
-                </div>
-
-                <div className="rounded-xl border bg-white p-3">
-                  <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-2 text-sm text-slate-700">
-                    Non-negotiable: morning reset daily + session Core Base first. Pain rule: stay at &lt;= 3/10 during
-                    and next day with no spreading symptoms. No RDLs for now.
-                  </div>
-                  <div className="mb-2 flex items-center justify-between">
-                    <div className="font-medium">Tier guidance</div>
-                    <Button variant="ghost" size="sm" onClick={clearTodayChecks}>
-                      Clear checks
-                    </Button>
-                  </div>
-                  <div className="mb-3 space-y-2">
-                    {tierRules.map((rule, idx) => (
-                      <div key={idx} className="flex items-start gap-3 rounded-lg border p-2">
-                        <Checkbox checked={!!checklist[idx]} onCheckedChange={() => toggleChecklistItem(idx)} />
-                        <div className="text-sm leading-5">{rule}</div>
-                      </div>
-                    ))}
+                <div className="rounded-2xl border border-white/70 bg-white/90 p-4">
+                  <div className="mb-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                    Non-negotiable: morning reset daily + session Core Base first. Pain rule: stay at &lt;= 3/10 during and
+                    the next day with no spreading symptoms.
                   </div>
 
-                  <div className="mb-2 text-sm font-medium">Today's exercise plan (from your editable session template)</div>
-                  <div className="space-y-2">
-                    {activeSessionConfig.exercises.map((exercise) => (
-                      <div key={exercise.id} className="rounded-lg border p-2">
-                        <div className="text-sm font-medium">{exercise.name}</div>
-                        <div className="text-xs text-slate-600">
-                          {exercise.load ? `Load target: ${exercise.load} · ` : ''}
-                          {exercise.prescription || 'No prescription set'}
+                  <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
+                    <div className="space-y-4">
+                      <div>
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <div className="font-medium">Tier guidance</div>
+                          <Button variant="ghost" size="sm" className="rounded-xl" onClick={clearTodayChecks}>
+                            Clear checks
+                          </Button>
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  <div className="rounded-xl border p-3">
-                    <div className="mb-2 flex items-center gap-2 font-medium">
-                      <Timer className="h-4 w-4" /> Session Core Base (required)
-                    </div>
-                    <div className="space-y-1 text-sm text-slate-700">
-                      {coreBaseExercises.map((exercise) => (
-                        <div key={exercise.id}>- {exercise.name}: {exercise.prescription}</div>
-                      ))}
-                    </div>
-                    <Button
-                      className="mt-3 rounded-xl"
-                      variant={state.coreDays[today] ? 'default' : 'outline'}
-                      onClick={markCoreDay}
-                    >
-                      {state.coreDays[today] ? 'Core Base logged' : 'Log Core Base'}
-                    </Button>
-                  </div>
-
-                  <div className="rounded-xl border p-3">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <div className="font-medium">Daily morning + snack tracker</div>
-                      <Button
-                        size="sm"
-                        variant={todayRoutine.committed ? 'default' : 'outline'}
-                        className="rounded-xl"
-                        onClick={toggleDailyCommit}
-                      >
-                        {todayRoutine.committed ? 'Committed today' : 'Commit today'}
-                      </Button>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="flex items-center gap-2 rounded-lg border p-2">
-                        <Checkbox checked={todayRoutine.morningResetDone} onCheckedChange={toggleMorningReset} />
-                        <span className="text-sm">Morning stiffness reset done (3-6 min)</span>
-                      </label>
-                    </div>
-                    <div className="mt-3 flex items-center justify-between text-xs text-slate-600">
-                      <span>Movement snacks today</span>
-                      <span>
-                        {snacksDone}/{DAILY_SNACK_SLOTS}
-                      </span>
-                    </div>
-                    <div className="mt-2 grid grid-cols-2 gap-2">
-                      {Array.from({ length: DAILY_SNACK_SLOTS }, (_, idx) => (
-                        <label key={idx} className="flex items-center gap-2 rounded-lg border p-2">
-                          <Checkbox checked={todayRoutine.snacks[idx]} onCheckedChange={() => toggleSnackSlot(idx)} />
-                          <span className="text-sm">Snack {idx + 1}</span>
-                        </label>
-                      ))}
-                    </div>
-                    <div className="mt-3 flex gap-2">
-                      <Button size="sm" variant="outline" className="rounded-xl" onClick={markNextSnack}>
-                        Mark next snack
-                      </Button>
-                      <Button size="sm" variant="ghost" className="rounded-xl" onClick={clearSnacks}>
-                        Clear snacks
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-2 rounded-xl border p-3">
-                    <Label htmlFor="notes">Quick notes (optional)</Label>
-                    <Textarea
-                      id="notes"
-                      value={state.notes}
-                      onChange={(event) => updateState({ notes: event.target.value })}
-                      placeholder="e.g. Pull-ups felt smooth. Back yellow but okay after warm-up."
-                      className="min-h-[120px]"
-                    />
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <Button onClick={completeSession} className="rounded-xl">
-                    <CheckCircle2 className="mr-2 h-4 w-4" /> Complete session & advance rotation
-                  </Button>
-                  <Button variant="outline" className="rounded-xl" onClick={markCoreDay}>
-                    Log Core Base only day
-                  </Button>
-                  <Button variant="outline" className="rounded-xl" onClick={resetBlock}>
-                    <RotateCcw className="mr-2 h-4 w-4" /> Reset block
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="log" className="space-y-4">
-            <Card className="rounded-2xl shadow-sm">
-              <CardHeader>
-                <CardTitle className="text-lg">Exact Set/Rep Logging for Today</CardTitle>
-                <p className="text-sm text-slate-600">Workout key: {workoutKey}</p>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {activeSessionConfig.exercises.map((exercise) => {
-                  const rows = setLogs[exercise.id] || []
-                  return (
-                    <div key={exercise.id} className="space-y-3 rounded-xl border p-3">
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <div className="font-medium">{exercise.name}</div>
-                          <div className="text-xs text-slate-600">
-                            Target load: {exercise.load || '-'} · {exercise.prescription || '-'}
-                          </div>
-                        </div>
-                        <Button size="sm" variant="outline" className="rounded-xl" onClick={() => addSetRow(exercise)}>
-                          <Plus className="mr-1 h-4 w-4" /> Add set
-                        </Button>
-                      </div>
-
-                      {rows.length === 0 ? (
-                        <div className="text-sm text-slate-500">No sets logged yet.</div>
-                      ) : (
                         <div className="space-y-2">
-                          {rows.map((row, i) => (
-                            <div key={i} className="grid grid-cols-12 items-center gap-2 rounded-lg border p-2">
-                              <div className="col-span-12 text-xs text-slate-500 sm:col-span-1">Set {i + 1}</div>
-                              <div className="col-span-4 sm:col-span-2">
-                                <Label className="text-xs">Reps</Label>
-                                <Input
-                                  value={row.reps}
-                                  onChange={(event) => updateSetRow(exercise.id, i, 'reps', event.target.value)}
-                                  placeholder="e.g. 5 or 30S"
-                                />
-                              </div>
-                              <div className="col-span-4 sm:col-span-3">
-                                <Label className="text-xs">Load</Label>
-                                <Input
-                                  value={row.load}
-                                  onChange={(event) => updateSetRow(exercise.id, i, 'load', event.target.value)}
-                                  placeholder="e.g. +12.5kg or BW"
-                                />
-                              </div>
-                              <div className="col-span-4 sm:col-span-2">
-                                <Label className="text-xs">RPE</Label>
-                                <Input
-                                  value={row.rpe}
-                                  onChange={(event) => updateSetRow(exercise.id, i, 'rpe', event.target.value)}
-                                  placeholder="6"
-                                />
-                              </div>
-                              <div className="col-span-8 flex items-center gap-2 pt-5 sm:col-span-2 sm:pt-0">
-                                <Checkbox
-                                  checked={row.done}
-                                  onCheckedChange={(checked) => updateSetRow(exercise.id, i, 'done', checked === true)}
-                                />
-                                <span className="text-sm">Done</span>
-                              </div>
-                              <div className="col-span-4 flex justify-end pt-5 sm:col-span-2 sm:pt-0">
-                                <Button size="icon" variant="ghost" onClick={() => removeSetRow(exercise.id, i)}>
-                                  <Trash2 className="h-4 w-4" />
-                                </Button>
+                          {tierRules.map((rule, idx) => (
+                            <div key={idx} className="flex items-start gap-3 rounded-xl border border-slate-200 bg-white p-3">
+                              <Checkbox checked={!!checklist[idx]} onCheckedChange={() => toggleChecklistItem(idx)} />
+                              <div className="text-sm leading-5">{rule}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="mb-2 text-sm font-medium">Exercise plan</div>
+                        <div className="space-y-2">
+                          {activeSessionConfig.exercises.map((exercise) => (
+                            <div key={exercise.id} className="rounded-xl border border-slate-200 bg-white p-3">
+                              <div className="text-sm font-medium">{exercise.name}</div>
+                              <div className="text-xs text-slate-600">
+                                {exercise.load ? `Load target: ${exercise.load} · ` : ''}
+                                {exercise.prescription || 'No prescription set'}
                               </div>
                             </div>
                           ))}
                         </div>
-                      )}
+                      </div>
                     </div>
-                  )
-                })}
 
-                <div className="rounded-xl border p-3 text-sm text-slate-600">
-                  New sets auto-prefill from target on set 1, then copy your previous set values on next adds. Reps can be
-                  text (example: <b>30S</b>) and bodyweight load can be <b>BW</b>.
+                    <div className="space-y-3">
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <div className="mb-2 flex items-center gap-2 font-medium">
+                          <Timer className="h-4 w-4" /> Core Base
+                        </div>
+                        <div className="space-y-1 text-sm text-slate-700">
+                          {coreBaseExercises.map((exercise) => (
+                            <div key={exercise.id}>
+                              - {exercise.name}: {exercise.prescription}
+                            </div>
+                          ))}
+                        </div>
+                        <Button
+                          className="mt-3 rounded-xl"
+                          variant={state.coreDays[today] ? 'default' : 'outline'}
+                          onClick={toggleCoreDay}
+                        >
+                          {state.coreDays[today] ? 'Core Base checked off' : 'Mark Core Base done'}
+                        </Button>
+                      </div>
+
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <div className="font-medium">Daily routine</div>
+                          <Button
+                            size="sm"
+                            variant={todayRoutine.committed ? 'default' : 'outline'}
+                            className="rounded-xl"
+                            onClick={toggleDailyCommit}
+                          >
+                            {todayRoutine.committed ? 'Committed today' : 'Commit today'}
+                          </Button>
+                        </div>
+                        <label className="flex items-center gap-2 rounded-xl border border-slate-200 p-3">
+                          <Checkbox checked={todayRoutine.morningResetDone} onCheckedChange={toggleMorningReset} />
+                          <span className="text-sm">Morning stiffness reset done (3-6 min)</span>
+                        </label>
+                        <div className="mt-3 flex items-center justify-between text-xs text-slate-600">
+                          <span>Movement snacks today</span>
+                          <span>
+                            {snacksDone}/{DAILY_SNACK_SLOTS}
+                          </span>
+                        </div>
+                        <div className="mt-2 grid grid-cols-2 gap-2">
+                          {Array.from({ length: DAILY_SNACK_SLOTS }, (_, idx) => (
+                            <label key={idx} className="flex items-center gap-2 rounded-xl border border-slate-200 p-3">
+                              <Checkbox checked={todayRoutine.snacks[idx]} onCheckedChange={() => toggleSnackSlot(idx)} />
+                              <span className="text-sm">Snack {idx + 1}</span>
+                            </label>
+                          ))}
+                        </div>
+                        <div className="mt-3 flex gap-2">
+                          <Button size="sm" variant="outline" className="rounded-xl" onClick={markNextSnack}>
+                            Mark next snack
+                          </Button>
+                          <Button size="sm" variant="ghost" className="rounded-xl" onClick={clearSnacks}>
+                            Clear snacks
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+                  <Card className="rounded-[24px] border-slate-200 shadow-none">
+                    <CardHeader className="pb-4">
+                      <CardTitle className="text-lg">Set Log</CardTitle>
+                      <p className="text-sm text-slate-600">Stable workout key: {workoutKey}</p>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {activeSessionConfig.exercises.map((exercise) => {
+                        const rows = setLogs[exercise.id] || []
+                        return (
+                          <div key={exercise.id} className="space-y-3 rounded-2xl border border-slate-200 p-3">
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <div className="font-medium">{exercise.name}</div>
+                                <div className="text-xs text-slate-600">
+                                  Target load: {exercise.load || '-'} · {exercise.prescription || '-'}
+                                </div>
+                              </div>
+                              <Button size="sm" variant="outline" className="rounded-xl" onClick={() => addSetRow(exercise)}>
+                                <Plus className="mr-1 h-4 w-4" /> Add set
+                              </Button>
+                            </div>
+
+                            {rows.length === 0 ? (
+                              <div className="text-sm text-slate-500">No sets logged yet.</div>
+                            ) : (
+                              <div className="space-y-2">
+                                {rows.map((row, index) => (
+                                  <div key={index} className="grid grid-cols-12 items-center gap-2 rounded-xl border border-slate-200 p-2">
+                                    <div className="col-span-12 text-xs text-slate-500 sm:col-span-1">Set {index + 1}</div>
+                                    <div className="col-span-4 sm:col-span-2">
+                                      <Label className="text-xs">Reps</Label>
+                                      <Input
+                                        value={row.reps}
+                                        onChange={(event) => updateSetRow(exercise.id, index, 'reps', event.target.value)}
+                                        placeholder="5 or 30S"
+                                      />
+                                    </div>
+                                    <div className="col-span-4 sm:col-span-3">
+                                      <Label className="text-xs">Load</Label>
+                                      <Input
+                                        value={row.load}
+                                        onChange={(event) => updateSetRow(exercise.id, index, 'load', event.target.value)}
+                                        placeholder="+12.5kg or BW"
+                                      />
+                                    </div>
+                                    <div className="col-span-4 sm:col-span-2">
+                                      <Label className="text-xs">RPE</Label>
+                                      <Input
+                                        value={row.rpe}
+                                        onChange={(event) => updateSetRow(exercise.id, index, 'rpe', event.target.value)}
+                                        placeholder="6"
+                                      />
+                                    </div>
+                                    <div className="col-span-8 flex items-center gap-2 pt-5 sm:col-span-2 sm:pt-0">
+                                      <Checkbox
+                                        checked={row.done}
+                                        onCheckedChange={(checked) => updateSetRow(exercise.id, index, 'done', checked === true)}
+                                      />
+                                      <span className="text-sm">Done</span>
+                                    </div>
+                                    <div className="col-span-4 flex justify-end pt-5 sm:col-span-2 sm:pt-0">
+                                      <Button size="icon" variant="ghost" onClick={() => removeSetRow(exercise.id, index)}>
+                                        <Trash2 className="h-4 w-4" />
+                                      </Button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                        Set 1 pre-fills from the prescription. Extra sets copy your last values so quick logging stays fast on
+                        mobile.
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <div className="space-y-4">
+                    <Card className={`rounded-[24px] border shadow-none ${todayLog ? logTypeThemes[todayLog.type].panel : 'border-slate-200'}`}>
+                      <CardHeader className="pb-4">
+                        <CardTitle className="text-lg">Today&apos;s status</CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-3">
+                        <div className="flex flex-wrap gap-2">
+                          <Badge variant="outline" className={`rounded-full px-3 py-1 ${todayStatus.className}`}>
+                            {todayStatus.label}
+                          </Badge>
+                          <Badge variant="outline" className="rounded-full px-3 py-1 bg-white">
+                            S{recommendation.plannedSession}
+                          </Badge>
+                          <Badge variant="outline" className="rounded-full px-3 py-1 bg-white">
+                            Tier {recommendation.tier}
+                          </Badge>
+                        </div>
+                        <p className="text-sm text-slate-700">{todayStatus.detail}</p>
+                        {todayLog ? (
+                          <div className="rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700">
+                            {describeHistoryLog(todayLog)}
+                          </div>
+                        ) : null}
+                      </CardContent>
+                    </Card>
+
+                    <Card className="rounded-[24px] border-slate-200 shadow-none">
+                      <CardHeader className="pb-4">
+                        <CardTitle className="text-lg">Notes</CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <Textarea
+                          id="notes"
+                          value={state.notes}
+                          onChange={(event) => updateState({ notes: event.target.value })}
+                          placeholder="Pull-ups felt smooth. Back yellow but okay after warm-up."
+                          className="min-h-[140px]"
+                        />
+                      </CardContent>
+                    </Card>
+                  </div>
                 </div>
               </CardContent>
             </Card>
+
+            <div className="sticky bottom-3 z-10">
+              <div className="rounded-[24px] border border-slate-200 bg-white/95 p-3 shadow-lg backdrop-blur">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">{todayStatus.label}</div>
+                    <div className="text-sm text-slate-600">
+                      {dayHasClosedWin
+                        ? 'Today is already saved in history.'
+                        : canUpgradeCoreOnly
+                          ? 'You can upgrade today from core-only to a full session.'
+                          : 'Save a full session or bank a core-only win.'}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      onClick={completeSession}
+                      className="rounded-xl"
+                      disabled={dayHasClosedWin}
+                    >
+                      <CheckCircle2 className="mr-2 h-4 w-4" />
+                      {canUpgradeCoreOnly ? 'Upgrade to full session' : 'Complete today'}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="rounded-xl"
+                      onClick={saveCoreOnlyWin}
+                      disabled={dayHasClosedWin || canUpgradeCoreOnly || todayLog?.type === 'core_only'}
+                    >
+                      Save core-only win
+                    </Button>
+                    <Button variant="ghost" size="sm" className="rounded-xl text-slate-500" onClick={resetBlock}>
+                      <RotateCcw className="mr-2 h-4 w-4" /> Reset block
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </TabsContent>
 
-          <TabsContent value="edit" className="space-y-4">
-            <Card className="rounded-2xl shadow-sm">
+          <TabsContent value="history" className="space-y-4">
+            <div className="grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
+              <Card className="rounded-[28px] border-slate-200 shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-lg">This Week at a Glance</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Wins</div>
+                      <div className="mt-1 text-3xl font-semibold text-slate-950">{weekStats.wins}</div>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Full sessions</div>
+                      <div className="mt-1 text-3xl font-semibold text-slate-950">{weekStats.fullSessions}</div>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Core-only</div>
+                      <div className="mt-1 text-3xl font-semibold text-slate-950">{weekStats.coreOnlyWins}</div>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="text-xs uppercase tracking-[0.16em] text-slate-500">Recovery subs</div>
+                      <div className="mt-1 text-3xl font-semibold text-slate-950">{weekStats.recoverySubs}</div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-sm text-slate-600">
+                      <span>Win progress</span>
+                      <span>{weekStats.progress}%</span>
+                    </div>
+                    <Progress value={weekStats.progress} />
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <div className="text-sm font-medium text-slate-900">Routine summary (last 7 days)</div>
+                    <div className="mt-3 space-y-3">
+                      <div>
+                        <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
+                          <span>Committed days</span>
+                          <span>{weeklySummary.committedDays}/7</span>
+                        </div>
+                        <Progress value={weeklySummary.commitProgress} />
+                      </div>
+                      <div>
+                        <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
+                          <span>Morning resets</span>
+                          <span>{weeklySummary.morningResetDays}/7</span>
+                        </div>
+                        <Progress value={weeklySummary.morningProgress} />
+                      </div>
+                      <div>
+                        <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
+                          <span>Movement snacks</span>
+                          <span>{weeklySummary.snackCount}/21</span>
+                        </div>
+                        <Progress value={weeklySummary.snackProgress} />
+                      </div>
+                      <div className="text-xs text-slate-500">Days with 3+ snacks: {weeklySummary.snackDaysAtLeastThree}/7</div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card className="rounded-[28px] border-slate-200 shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-lg">History</CardTitle>
+                  <p className="text-sm text-slate-600">Recent wins, substitutions, and saved notes.</p>
+                </CardHeader>
+                <CardContent>
+                  {state.logs.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-slate-300 p-6 text-sm text-slate-600">
+                      No history yet. Your first saved win will appear here.
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {state.logs.slice(0, 18).map((log) => (
+                        <div key={log.id} className={`rounded-[22px] border p-4 ${logTypeThemes[log.type].panel}`}>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant="outline" className="rounded-full px-3 py-1 bg-white">
+                              {log.localDate}
+                            </Badge>
+                            <Badge variant="outline" className="rounded-full px-3 py-1 bg-white">
+                              W{log.week}
+                            </Badge>
+                            <Badge variant="outline" className={`rounded-full px-3 py-1 ${logTypeThemes[log.type].badge}`}>
+                              {getLogTypeLabel(log.type)}
+                            </Badge>
+                            <Badge variant="outline" className="rounded-full px-3 py-1 bg-white">
+                              Back: {log.backStatus}
+                            </Badge>
+                            <Badge variant="outline" className="rounded-full px-3 py-1 bg-white">
+                              Energy: {log.energy}
+                            </Badge>
+                          </div>
+                          <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-slate-800">
+                            <span className="font-medium">{describeHistoryLog(log)}</span>
+                            <span className="text-slate-500">·</span>
+                            <span>{log.exerciseSetCount} sets logged</span>
+                            <span className="text-slate-500">·</span>
+                            <span>{log.checklistCompleted} checks</span>
+                          </div>
+                          {log.note ? <div className="mt-2 text-sm text-slate-600">"{log.note}"</div> : null}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="templates" className="space-y-4">
+            <Card className="rounded-[28px] border-slate-200 shadow-sm">
               <CardHeader>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <CardTitle className="flex items-center gap-2 text-lg">
-                    <Save className="h-4 w-4" /> Edit session templates (exercise names + loads)
+                    <Save className="h-4 w-4" /> Session Templates
                   </CardTitle>
                   <Button size="sm" variant="outline" className="rounded-xl" onClick={resetSessionTemplatesToCoreFirst}>
-                    Reset to core-first defaults
+                    Reset to defaults
                   </Button>
                 </div>
                 <p className="text-sm text-slate-600">Changes save automatically to Supabase.</p>
@@ -1561,34 +1483,34 @@ export default function App() {
                 {[1, 2, 3, 4].map((sessionNum) => {
                   const sessionConfig = state.sessionConfigs[sessionNum]
                   return (
-                    <div key={sessionNum} className="space-y-3 rounded-xl border p-3">
-                      <div className="font-medium">
-                        S{sessionNum}: {sessionConfig.name}
+                    <div key={sessionNum} className="space-y-3 rounded-[24px] border border-slate-200 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="font-medium">
+                            S{sessionNum}: {sessionConfig.name}
+                          </div>
+                          <div className="text-xs text-slate-600">{sessionConfig.focus}</div>
+                        </div>
+                        <Badge variant="secondary" className="rounded-full px-3 py-1">
+                          {sessionConfig.exercises.length} exercises
+                        </Badge>
                       </div>
-                      <div className="text-xs text-slate-600">{sessionConfig.focus}</div>
 
                       <div className="space-y-3">
                         {sessionConfig.exercises.map((exercise) => (
-                          <div
-                            key={exercise.id}
-                            className="grid grid-cols-1 items-start gap-2 rounded-lg border p-3 md:grid-cols-12"
-                          >
+                          <div key={exercise.id} className="grid grid-cols-1 items-start gap-2 rounded-2xl border border-slate-200 p-3 md:grid-cols-12">
                             <div className="md:col-span-4">
                               <Label className="text-xs">Exercise name</Label>
                               <Input
                                 value={exercise.name}
-                                onChange={(event) =>
-                                  updateExerciseField(sessionNum, exercise.id, 'name', event.target.value)
-                                }
+                                onChange={(event) => updateExerciseField(sessionNum, exercise.id, 'name', event.target.value)}
                               />
                             </div>
                             <div className="md:col-span-3">
                               <Label className="text-xs">Default load</Label>
                               <Input
                                 value={exercise.load}
-                                onChange={(event) =>
-                                  updateExerciseField(sessionNum, exercise.id, 'load', event.target.value)
-                                }
+                                onChange={(event) => updateExerciseField(sessionNum, exercise.id, 'load', event.target.value)}
                                 placeholder="BW / +10 kg"
                               />
                             </div>
@@ -1599,7 +1521,7 @@ export default function App() {
                                 onChange={(event) =>
                                   updateExerciseField(sessionNum, exercise.id, 'prescription', event.target.value)
                                 }
-                                placeholder="e.g. 4 x 5 @ RPE 6"
+                                placeholder="4 x 5 @ RPE 6"
                               />
                             </div>
                             <div className="flex pt-5 md:col-span-1 md:justify-end">
@@ -1611,12 +1533,7 @@ export default function App() {
                         ))}
                       </div>
 
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="rounded-xl"
-                        onClick={() => addExercise(sessionNum)}
-                      >
+                      <Button size="sm" variant="outline" className="rounded-xl" onClick={() => addExercise(sessionNum)}>
                         <Plus className="mr-1 h-4 w-4" /> Add exercise to S{sessionNum}
                       </Button>
                     </div>
@@ -1626,39 +1543,6 @@ export default function App() {
             </Card>
           </TabsContent>
         </Tabs>
-
-        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }}>
-          <Card className="rounded-2xl shadow-sm">
-            <CardHeader>
-              <CardTitle className="text-lg">Recent Log</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {state.logs.length === 0 ? (
-                <div className="text-sm text-slate-600">No sessions logged yet. Your first Tier C counts.</div>
-              ) : (
-                <div className="space-y-2">
-                  {state.logs.slice(0, 10).map((log, idx) => (
-                    <div key={idx} className="rounded-lg border p-3 text-sm">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">{log.date}</Badge>
-                        <Badge>W{log.week}</Badge>
-                        <Badge variant="secondary">S{log.session}</Badge>
-                        <Badge variant="secondary">Tier {log.tier}</Badge>
-                        <Badge variant="outline">Back: {log.backStatus}</Badge>
-                        <Badge variant="outline">Energy: {log.energy}</Badge>
-                      </div>
-                      <div className="mt-2 text-slate-700">
-                        {log.mainLiftDone ? 'Session done' : 'Partial'} · {log.minutesAvailable} min ·{' '}
-                        {log.checklistCompleted} checks · {log.exerciseSetCount || 0} sets logged
-                      </div>
-                      {log.note ? <div className="mt-1 text-slate-600">"{log.note}"</div> : null}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </motion.div>
       </div>
     </div>
   )
